@@ -12,6 +12,7 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app import models
+from app.standard_number import normalize_standard_no
 from app.status_calibration import attach_change_logs_to_documents, calibrate_resource_status
 from app.trusted_source_adapters import TrustedSourceAdapter, TrustedSourceSyncOptions, TrustedSourceSyncStats, registry
 
@@ -263,6 +264,78 @@ def _record_change(
     )
 
 
+def _extract_relation_candidates(text: str | None) -> list[str]:
+    if not text:
+        return []
+    pattern = re.compile(
+        r"(?:GB/T|GB|JGJ/T|JGJ|CJJ/T|CJJ|CECS|DB\d{0,2}/T|DB\d{0,2}|T/[A-Z0-9]+|[A-Z]{2,8}/T|[A-Z]{2,8})"
+        r"\s*[A-Z]?\d+[A-Z0-9./-]*(?:\s*[-\u2010-\u2015\uff0d]\s*\d{4})?",
+        re.IGNORECASE,
+    )
+    values: list[str] = []
+    seen: set[str] = set()
+    for match in pattern.finditer(text):
+        normalized = normalize_standard_no(match.group(0)).normalized
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            values.append(normalized)
+    return values
+
+
+def _relation_type(text: str) -> str:
+    if "局部修订" in text:
+        return "局部修订"
+    if "被" in text and "替代" in text:
+        return "被替代"
+    if "替代" in text or "代替" in text:
+        return "替代"
+    return "相关"
+
+
+def _upsert_relations(db: Session, resource: models.StandardResource, detail: dict[str, Any]) -> None:
+    current_no = resource.normalized_standard_no or normalize_standard_no(resource.standard_no).normalized
+    if not current_no:
+        return
+    text = "\n".join(
+        value
+        for value in [
+            detail.get("change_info"),
+            detail.get("related_books"),
+            detail.get("summary"),
+        ]
+        if value
+    )
+    if not text:
+        return
+    relation_type = _relation_type(text)
+    for related_no in _extract_relation_candidates(text):
+        if related_no == current_no:
+            continue
+        existing = (
+            db.query(models.StandardRelation)
+            .filter(
+                models.StandardRelation.current_standard_no == current_no,
+                models.StandardRelation.related_standard_no == related_no,
+                models.StandardRelation.relation_type == relation_type,
+                models.StandardRelation.source_url == resource.detail_url,
+            )
+            .first()
+        )
+        if existing:
+            continue
+        db.add(
+            models.StandardRelation(
+                current_standard_resource_id=resource.id,
+                current_standard_no=current_no,
+                related_standard_no=related_no,
+                relation_type=relation_type,
+                relation_text=text[:1000],
+                source_url=resource.detail_url,
+                is_manual_confirmed=False,
+            )
+        )
+
+
 def _upsert_resource(
     db: Session,
     source: models.TrustedSource,
@@ -289,8 +362,17 @@ def _upsert_resource(
         db.add(resource)
         db.flush()
 
+    standard_no = item.get("standard_no") or resource.standard_no
+    number_parts = normalize_standard_no(standard_no)
     updates = {
-        "standard_no": item.get("standard_no") or resource.standard_no,
+        "standard_no": standard_no,
+        "raw_standard_no": number_parts.raw,
+        "normalized_standard_no": number_parts.normalized,
+        "standard_prefix": number_parts.prefix,
+        "standard_main_no": number_parts.main_no,
+        "standard_year": number_parts.year,
+        "standard_revision_note": number_parts.revision_note,
+        "source_status_raw": item.get("status"),
         "standard_name": item["title"],
         "source_status": item.get("status"),
         "system_status": "来源确认废止" if item.get("status") == "废止" else "来源确认现行",
@@ -340,6 +422,31 @@ def _upsert_resource(
             "related_books",
         ]:
             setattr(existing_detail, field_name, detail.get(field_name))
+
+        evidence_exists = (
+            db.query(models.StandardEvidence)
+            .filter(
+                models.StandardEvidence.standard_resource_id == resource.id,
+                models.StandardEvidence.page_html_hash == detail.get("detail_hash"),
+                models.StandardEvidence.raw_status_text == resource.source_status,
+            )
+            .first()
+        )
+        if evidence_exists is None:
+            db.add(
+                models.StandardEvidence(
+                    standard_resource_id=resource.id,
+                    source_name=source.source_name,
+                    source_level=source.trust_level,
+                    source_url=resource.detail_url,
+                    raw_status_text=resource.source_status,
+                    parsed_status=resource.system_status,
+                    page_summary=resource.summary,
+                    page_html_hash=resource.detail_hash,
+                    evidence_note=f"{source.source_name} 详情页状态证据，可信等级 {source.trust_level}",
+                )
+            )
+        _upsert_relations(db, resource, detail)
 
     return resource, created
 

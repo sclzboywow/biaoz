@@ -14,6 +14,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from app import models, schemas
+from app.standard_number import normalize_standard_no
 from app.storage import check_storage_root, relative_storage_path
 
 
@@ -284,9 +285,17 @@ def archive_downloaded_content(
         alert_type = "文件更新"
         message = f"发现新版本：{file_name}"
     else:
+        standard_no = extract_standard_no(source)
+        number_parts = normalize_standard_no(standard_no)
         document = models.Document(
             title=source.source_name or Path(file_name).stem or source.url,
-            standard_no=extract_standard_no(source),
+            standard_no=standard_no,
+            raw_standard_no=number_parts.raw,
+            normalized_standard_no=number_parts.normalized,
+            standard_prefix=number_parts.prefix,
+            standard_main_no=number_parts.main_no,
+            standard_year=number_parts.year,
+            standard_revision_note=number_parts.revision_note,
             doc_type=doc_type(file_name, downloaded.content_type),
             category=source.category,
             valid_status=models.ValidStatus.pending.value,

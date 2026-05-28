@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from difflib import SequenceMatcher
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import desc, func, or_, select
 from sqlalchemy.orm import Session
@@ -17,6 +17,7 @@ from app.guobiao_sync import sync_guobiao_resources  # noqa: F401  # imports and
 from app.migrations import run_lightweight_migrations
 from app.scheduler import run_url_check_loop
 from app.settings_store import ensure_default_settings, ensure_default_trusted_sources, get_bool_setting, get_int_setting
+from app.standard_number import normalize_standard_no
 from app.status_calibration import calibrate_resource_status
 from app.trusted_source_adapters import TrustedSourceSyncOptions, registry
 from app.storage import check_storage_root, configured_storage_root, relative_storage_path, save_upload
@@ -65,6 +66,37 @@ def health() -> dict[str, str]:
 
 api = FastAPI()
 
+
+def apply_standard_number_fields(target, value: str | None) -> None:
+    parts = normalize_standard_no(value)
+    target.raw_standard_no = parts.raw
+    target.normalized_standard_no = parts.normalized
+    target.standard_prefix = parts.prefix
+    target.standard_main_no = parts.main_no
+    target.standard_year = parts.year
+    target.standard_revision_note = parts.revision_note
+
+
+def chain_processing_advice(
+    source_status: str | None,
+    system_status: str | None,
+    manual_status: str | None,
+    match_count: int,
+    alert_count: int,
+) -> str:
+    if manual_status and manual_status not in {"待复核", "寰呭鏍?"}:
+        return f"已存在人工复核结论：{manual_status}。后续以人工结论为准，可信源变化作为提醒。"
+    if source_status and ("废止" in source_status or "搴熸" in source_status):
+        return "可信源显示废止，建议复核是否需要标记为确认废止，并检查是否存在替代标准。"
+    if system_status and "冲突" in system_status:
+        return "系统发现多来源或状态冲突，建议优先查看证据链和同步记录。"
+    if match_count == 0:
+        return "尚未匹配本地文件，建议先按规范化编号匹配或人工确认。"
+    if alert_count > 0:
+        return "存在未处理提醒，建议查看提醒记录并完成处理。"
+    if source_status and ("现行" in source_status or "鐜拌" in source_status):
+        return "可信源显示现行，当前无明显异常，建议保持定期同步。"
+    return "状态证据不足，建议补充可信源详情或人工复核。"
 
 @api.get("/url-sources", response_model=list[schemas.UrlSourceOut])
 def list_url_sources(skip: int = 0, limit: int = 50, db: Session = Depends(get_db)):
@@ -145,6 +177,72 @@ def check_all_url_sources(include_manual: bool = False, db: Session = Depends(ge
     return schemas.CheckAllResult(total=len(results), results=results)
 
 
+def run_url_check_task(task_id: int, include_manual: bool, batch_size: int) -> None:
+    with SessionLocal() as db:
+        task = db.get(models.CollectionTask, task_id)
+        if task is None:
+            return
+        task.status = "running"
+        task.started_at = datetime.now(UTC)
+        timeout_seconds = get_int_setting(db, "download_timeout_seconds", 30)
+        statement = select(models.UrlSource.id).order_by(models.UrlSource.id)
+        if not include_manual:
+            statement = statement.where(models.UrlSource.check_frequency != "manual")
+        source_ids = list(db.scalars(statement))
+        task.total = len(source_ids)
+        db.commit()
+
+        try:
+            for index in range(0, len(source_ids), max(batch_size, 1)):
+                for source_id in source_ids[index : index + max(batch_size, 1)]:
+                    source = db.get(models.UrlSource, source_id)
+                    if source is None:
+                        continue
+                    result = check_url_source(db, source, settings.storage_root, timeout_seconds)
+                    task = db.get(models.CollectionTask, task_id)
+                    if task is None:
+                        return
+                    task.processed += 1
+                    if result.ok:
+                        task.success += 1
+                    else:
+                        task.failed += 1
+                    task.updated_at = datetime.now(UTC)
+                    db.commit()
+            task = db.get(models.CollectionTask, task_id)
+            if task:
+                task.status = "finished"
+                task.finished_at = datetime.now(UTC)
+                task.message = "批量 URL 检查完成"
+                db.commit()
+        except Exception as exc:  # pragma: no cover - background task safety net
+            task = db.get(models.CollectionTask, task_id)
+            if task:
+                task.status = "failed"
+                task.finished_at = datetime.now(UTC)
+                task.message = str(exc)
+                db.commit()
+
+
+@api.post("/collection-tasks/url-check", response_model=schemas.CollectionTaskOut)
+def create_url_check_task(
+    payload: schemas.CollectionTaskCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    task = models.CollectionTask(task_type="url_check", status="pending")
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    background_tasks.add_task(run_url_check_task, task.id, payload.include_manual, min(max(payload.batch_size, 1), 500))
+    return task
+
+
+@api.get("/collection-tasks", response_model=list[schemas.CollectionTaskOut])
+def list_collection_tasks(skip: int = 0, limit: int = 20, db: Session = Depends(get_db)):
+    return list(db.scalars(select(models.CollectionTask).order_by(desc(models.CollectionTask.id)).offset(skip).limit(limit)))
+
+
 @api.get("/documents", response_model=list[schemas.DocumentOut])
 def list_documents(skip: int = 0, limit: int = 50, db: Session = Depends(get_db)):
     return crud.list_items(db, models.Document, skip, limit)
@@ -171,6 +269,7 @@ def page_documents(
             or_(
                 models.Document.title.like(keyword),
                 models.Document.standard_no.like(keyword),
+                models.Document.normalized_standard_no.like(keyword),
                 models.Document.category.like(keyword),
                 models.Document.issuing_authority.like(keyword),
             )
@@ -191,7 +290,12 @@ def page_documents(
 
 @api.post("/documents", response_model=schemas.DocumentOut)
 def create_document(payload: schemas.DocumentCreate, db: Session = Depends(get_db)):
-    return crud.create_item(db, models.Document, payload.model_dump(exclude_none=True))
+    item = models.Document(**payload.model_dump(exclude_none=True))
+    apply_standard_number_fields(item, item.standard_no)
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
 
 
 @api.patch("/documents/{document_id}", response_model=schemas.DocumentOut)
@@ -199,7 +303,13 @@ def update_document(document_id: int, payload: schemas.DocumentUpdate, db: Sessi
     item = crud.get_item(db, models.Document, document_id)
     if item is None:
         raise HTTPException(status_code=404, detail="文件不存在")
-    return crud.update_item(db, item, payload.model_dump(exclude_unset=True))
+    data = payload.model_dump(exclude_unset=True)
+    updated = crud.update_item(db, item, data)
+    if "standard_no" in data:
+        apply_standard_number_fields(updated, updated.standard_no)
+        db.commit()
+        db.refresh(updated)
+    return updated
 
 
 @api.post("/documents/{document_id}/versions/upload", response_model=schemas.UploadVersionResponse)
@@ -502,6 +612,7 @@ def page_standard_resources(
         filters.append(
             or_(
                 models.StandardResource.standard_no.like(keyword),
+                models.StandardResource.normalized_standard_no.like(keyword),
                 models.StandardResource.standard_name.like(keyword),
                 models.StandardResource.keywords.like(keyword),
                 models.StandardResource.source_category_path.like(keyword),
@@ -545,18 +656,28 @@ def list_source_status_sync_logs(limit: int = 100, db: Session = Depends(get_db)
 @api.post("/standard-file-matches/run", response_model=schemas.MatchRunResult)
 def run_standard_file_match(db: Session = Depends(get_db)):
     resources = list(
-        db.scalars(select(models.StandardResource).where(models.StandardResource.standard_no.is_not(None)))
+        db.scalars(
+            select(models.StandardResource).where(
+                or_(
+                    models.StandardResource.normalized_standard_no.is_not(None),
+                    models.StandardResource.standard_no.is_not(None),
+                )
+            )
+        )
     )
     by_no: dict[str, list[models.StandardResource]] = {}
     for resource in resources:
-        if resource.standard_no:
-            by_no.setdefault(resource.standard_no.strip(), []).append(resource)
+        key = resource.normalized_standard_no or normalize_standard_no(resource.standard_no).normalized
+        if key:
+            by_no.setdefault(key.strip(), []).append(resource)
 
     matched = 0
     skipped = 0
     documents = list(db.scalars(select(models.Document).where(models.Document.standard_no.is_not(None))))
     for document in documents:
-        standard_no = (document.standard_no or "").strip()
+        if document.standard_no and not document.normalized_standard_no:
+            apply_standard_number_fields(document, document.standard_no)
+        standard_no = (document.normalized_standard_no or normalize_standard_no(document.standard_no).normalized or "").strip()
         candidates = by_no.get(standard_no, [])
         if not candidates:
             skipped += 1
@@ -580,9 +701,9 @@ def run_standard_file_match(db: Session = Depends(get_db)):
                 standard_resource_id=best.id,
                 document_id=document.id,
                 document_version_id=document.current_version_id,
-                match_type="标准编号完全一致",
+                match_type="规范化编号一致",
                 match_score=100 if len(candidates) == 1 else score,
-                match_reason=f"标准编号一致：{standard_no}",
+                match_reason=f"本地编号与可信源规范化后均为：{standard_no}",
                 status="自动确认" if len(candidates) == 1 else "待确认",
             )
         )
@@ -611,6 +732,8 @@ def get_standard_resource_chain(resource_id: int, db: Session = Depends(get_db))
         if document_ids
         else []
     )
+    source_ids = sorted({version.url_source_id for version in versions if version.url_source_id})
+    url_sources = list(db.scalars(select(models.UrlSource).where(models.UrlSource.id.in_(source_ids)))) if source_ids else []
     change_logs = list(
         db.scalars(
             select(models.StandardChangeLog)
@@ -625,15 +748,52 @@ def get_standard_resource_chain(resource_id: int, db: Session = Depends(get_db))
             .order_by(desc(models.SourceStatusSyncLog.synced_at))
         )
     )
+    evidences = list(
+        db.scalars(
+            select(models.StandardEvidence)
+            .where(
+                or_(
+                    models.StandardEvidence.standard_resource_id == resource_id,
+                    models.StandardEvidence.document_id.in_(document_ids) if document_ids else False,
+                )
+            )
+            .order_by(desc(models.StandardEvidence.captured_at))
+        )
+    )
+    relation_no = resource.normalized_standard_no or resource.standard_no
+    relations = list(
+        db.scalars(
+            select(models.StandardRelation)
+            .where(
+                or_(
+                    models.StandardRelation.current_standard_resource_id == resource_id,
+                    models.StandardRelation.related_standard_resource_id == resource_id,
+                    models.StandardRelation.current_standard_no == relation_no,
+                    models.StandardRelation.related_standard_no == relation_no,
+                )
+            )
+            .order_by(desc(models.StandardRelation.discovered_at))
+        )
+    )
     alerts = list(db.scalars(select(models.Alert).where(models.Alert.document_id.in_(document_ids)))) if document_ids else []
     return schemas.ResourceChainOut(
         resource=resource,
         matches=matches,
         documents=documents,
         versions=versions,
+        url_sources=url_sources,
         change_logs=change_logs,
         sync_logs=sync_logs,
+        evidences=evidences,
+        relations=relations,
         alerts=alerts,
+        processing_advice=chain_processing_advice(
+            resource.source_status,
+            resource.system_status,
+            resource.manual_status,
+            len(matches),
+            len([alert for alert in alerts if alert.status == models.AlertStatus.pending.value]),
+        ),
     )
 
 
@@ -662,6 +822,8 @@ def get_document_chain(document_id: int, db: Session = Depends(get_db)):
         if resource_ids
         else []
     )
+    source_ids = sorted({version.url_source_id for version in versions if version.url_source_id})
+    url_sources = list(db.scalars(select(models.UrlSource).where(models.UrlSource.id.in_(source_ids)))) if source_ids else []
     change_logs = list(
         db.scalars(
             select(models.StandardChangeLog)
@@ -676,6 +838,39 @@ def get_document_chain(document_id: int, db: Session = Depends(get_db)):
             .order_by(desc(models.SourceStatusSyncLog.synced_at))
         )
     )
+    evidences = list(
+        db.scalars(
+            select(models.StandardEvidence)
+            .where(
+                or_(
+                    models.StandardEvidence.document_id == document_id,
+                    models.StandardEvidence.standard_resource_id.in_(resource_ids) if resource_ids else False,
+                )
+            )
+            .order_by(desc(models.StandardEvidence.captured_at))
+        )
+    )
+    relation_numbers = {resource.normalized_standard_no or resource.standard_no for resource in resources}
+    relation_numbers.add(document.normalized_standard_no or document.standard_no)
+    relation_numbers.discard(None)
+    relations = (
+        list(
+            db.scalars(
+                select(models.StandardRelation)
+                .where(
+                    or_(
+                        models.StandardRelation.current_standard_resource_id.in_(resource_ids) if resource_ids else False,
+                        models.StandardRelation.related_standard_resource_id.in_(resource_ids) if resource_ids else False,
+                        models.StandardRelation.current_standard_no.in_(relation_numbers),
+                        models.StandardRelation.related_standard_no.in_(relation_numbers),
+                    )
+                )
+                .order_by(desc(models.StandardRelation.discovered_at))
+            )
+        )
+        if relation_numbers or resource_ids
+        else []
+    )
     alerts = list(
         db.scalars(select(models.Alert).where(models.Alert.document_id == document_id).order_by(desc(models.Alert.id)))
     )
@@ -684,9 +879,19 @@ def get_document_chain(document_id: int, db: Session = Depends(get_db)):
         versions=versions,
         matches=matches,
         resources=resources,
+        url_sources=url_sources,
         change_logs=change_logs,
         sync_logs=sync_logs,
+        evidences=evidences,
+        relations=relations,
         alerts=alerts,
+        processing_advice=chain_processing_advice(
+            document.source_status,
+            document.system_status or document.valid_status,
+            document.manual_status or document.review_status,
+            len(matches),
+            len([alert for alert in alerts if alert.status == models.AlertStatus.pending.value]),
+        ),
     )
 
 

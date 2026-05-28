@@ -2,15 +2,21 @@ from __future__ import annotations
 
 from difflib import SequenceMatcher
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app import models
+from app.standard_number import normalize_standard_no
 
 
 SOURCE_STATUS_TO_DOCUMENT_STATUS = {
     "现行": "来源确认现行",
     "废止": "来源确认废止",
+    "被替代": "疑似被替代",
+    "即将实施": "待复核",
+    "未知": "待复核",
+    "鐜拌": "来源确认现行",
+    "搴熸": "来源确认废止",
 }
 
 
@@ -18,17 +24,45 @@ def _similarity(left: str | None, right: str | None) -> int:
     return int(SequenceMatcher(None, left or "", right or "").ratio() * 100)
 
 
+def _resource_number(resource: models.StandardResource) -> str | None:
+    return resource.normalized_standard_no or normalize_standard_no(resource.standard_no).normalized
+
+
+def _document_number(document: models.Document) -> str | None:
+    normalized = document.normalized_standard_no or normalize_standard_no(document.standard_no).normalized
+    if normalized and not document.normalized_standard_no:
+        parts = normalize_standard_no(document.standard_no)
+        document.raw_standard_no = parts.raw
+        document.normalized_standard_no = parts.normalized
+        document.standard_prefix = parts.prefix
+        document.standard_main_no = parts.main_no
+        document.standard_year = parts.year
+        document.standard_revision_note = parts.revision_note
+    return normalized
+
+
 def match_resource_to_documents(db: Session, resource: models.StandardResource) -> list[models.StandardFileMatch]:
-    if not resource.standard_no:
+    resource_no = _resource_number(resource)
+    if not resource_no:
         return []
 
     documents = list(
         db.scalars(
-            select(models.Document).where(models.Document.standard_no == resource.standard_no)
+            select(models.Document).where(
+                or_(
+                    models.Document.normalized_standard_no == resource_no,
+                    models.Document.standard_no == resource.standard_no,
+                )
+            )
         )
     )
+
     matches: list[models.StandardFileMatch] = []
     for document in documents:
+        document_no = _document_number(document)
+        if document_no != resource_no and document.standard_no != resource.standard_no:
+            continue
+
         existing = db.scalars(
             select(models.StandardFileMatch).where(
                 models.StandardFileMatch.standard_resource_id == resource.id,
@@ -44,9 +78,9 @@ def match_resource_to_documents(db: Session, resource: models.StandardResource) 
             standard_resource_id=resource.id,
             document_id=document.id,
             document_version_id=document.current_version_id,
-            match_type="标准编号完全一致",
+            match_type="规范化编号一致",
             match_score=100 if score >= 60 else score,
-            match_reason=f"标准编号一致：{resource.standard_no}",
+            match_reason=f"本地文件与可信源编号规范化后均为：{resource_no}",
             status="自动确认" if score >= 60 else "待确认",
         )
         db.add(match)
@@ -67,17 +101,21 @@ def calibrate_resource_status(db: Session, resource: models.StandardResource) ->
         if document is None:
             continue
 
-        source_status = resource.source_status or ""
+        source_status = resource.source_status or "未知"
         suggested_status = SOURCE_STATUS_TO_DOCUMENT_STATUS.get(source_status)
         if not suggested_status:
-            continue
+            suggested_status = "待复核"
 
-        old_status = document.valid_status
-        is_conflict = old_status not in {suggested_status, "待确认", None}
+        old_status = document.system_status or document.valid_status
+        document.source_status = source_status
+        document.system_status = suggested_status
+
+        is_conflict = old_status not in {suggested_status, "待确认", "寰呯‘璁?", None}
         sync_action = "生成复核任务" if is_conflict else "来源状态同步"
         sync_reason = (
             f"可信源 {resource.source_name or '国标电子书库'} 显示状态为 {source_status}"
             + (f"，废止日期 {resource.abolish_date}" if resource.abolish_date else "")
+            + (f"，详情页 {resource.detail_url}" if resource.detail_url else "")
         )
 
         db.add(
@@ -92,7 +130,31 @@ def calibrate_resource_status(db: Session, resource: models.StandardResource) ->
         )
         created_logs += 1
 
-        if is_conflict or source_status == "废止":
+        evidence_exists = db.scalars(
+            select(models.StandardEvidence).where(
+                models.StandardEvidence.standard_resource_id == resource.id,
+                models.StandardEvidence.document_id == document.id,
+                models.StandardEvidence.raw_status_text == source_status,
+                models.StandardEvidence.page_html_hash == resource.detail_hash,
+            )
+        ).first()
+        if evidence_exists is None:
+            db.add(
+                models.StandardEvidence(
+                    standard_resource_id=resource.id,
+                    document_id=document.id,
+                    source_name=resource.source_name,
+                    source_level="A",
+                    source_url=resource.detail_url,
+                    raw_status_text=source_status,
+                    parsed_status=suggested_status,
+                    page_summary=resource.summary,
+                    page_html_hash=resource.detail_hash,
+                    evidence_note=sync_reason,
+                )
+            )
+
+        if is_conflict or suggested_status in {"来源确认废止", "疑似被替代"}:
             db.add(
                 models.Alert(
                     document_id=document.id,
@@ -107,7 +169,7 @@ def calibrate_resource_status(db: Session, resource: models.StandardResource) ->
                 )
             )
             created_alerts += 1
-        elif document.review_status != models.ReviewStatus.confirmed.value:
+        elif document.manual_status is None and document.review_status != models.ReviewStatus.confirmed.value:
             document.valid_status = suggested_status
 
     return {"matches": len(matches), "sync_logs": created_logs, "alerts": created_alerts}

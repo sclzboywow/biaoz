@@ -81,6 +81,15 @@ class Document(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     standard_no: Mapped[str | None] = mapped_column(String(120), index=True)
+    raw_standard_no: Mapped[str | None] = mapped_column(String(160), index=True)
+    normalized_standard_no: Mapped[str | None] = mapped_column(String(160), index=True)
+    standard_prefix: Mapped[str | None] = mapped_column(String(40), index=True)
+    standard_main_no: Mapped[str | None] = mapped_column(String(80), index=True)
+    standard_year: Mapped[str | None] = mapped_column(String(10), index=True)
+    standard_revision_note: Mapped[str | None] = mapped_column(String(255))
+    source_status: Mapped[str | None] = mapped_column(String(80), index=True)
+    system_status: Mapped[str | None] = mapped_column(String(80), index=True)
+    manual_status: Mapped[str | None] = mapped_column(String(80), index=True)
     doc_type: Mapped[str | None] = mapped_column(String(50))
     category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id"))
     category: Mapped[str | None] = mapped_column(String(120))
@@ -268,6 +277,13 @@ class StandardResource(TimestampMixin, Base):
     source_book_id: Mapped[str | None] = mapped_column(String(120), index=True)
     source_name: Mapped[str | None] = mapped_column(String(120))
     standard_no: Mapped[str | None] = mapped_column(String(120), index=True)
+    raw_standard_no: Mapped[str | None] = mapped_column(String(160), index=True)
+    normalized_standard_no: Mapped[str | None] = mapped_column(String(160), index=True)
+    standard_prefix: Mapped[str | None] = mapped_column(String(40), index=True)
+    standard_main_no: Mapped[str | None] = mapped_column(String(80), index=True)
+    standard_year: Mapped[str | None] = mapped_column(String(10), index=True)
+    standard_revision_note: Mapped[str | None] = mapped_column(String(255))
+    source_status_raw: Mapped[str | None] = mapped_column(String(160))
     standard_name: Mapped[str] = mapped_column(String(500), nullable=False)
     resource_type: Mapped[str | None] = mapped_column(String(120), index=True)
     source_status: Mapped[str | None] = mapped_column(String(80), index=True)
@@ -304,6 +320,38 @@ class StandardDetail(Base):
     raw_html_path: Mapped[str | None] = mapped_column(Text)
     raw_text_path: Mapped[str | None] = mapped_column(Text)
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class StandardEvidence(Base):
+    __tablename__ = "standard_evidence"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    standard_resource_id: Mapped[int | None] = mapped_column(ForeignKey("standard_resources.id"))
+    document_id: Mapped[int | None] = mapped_column(ForeignKey("documents.id"))
+    source_name: Mapped[str | None] = mapped_column(String(120))
+    source_level: Mapped[str | None] = mapped_column(String(30))
+    source_url: Mapped[str | None] = mapped_column(Text)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    raw_status_text: Mapped[str | None] = mapped_column(String(160))
+    parsed_status: Mapped[str | None] = mapped_column(String(80))
+    page_summary: Mapped[str | None] = mapped_column(Text)
+    page_html_hash: Mapped[str | None] = mapped_column(String(128))
+    evidence_note: Mapped[str | None] = mapped_column(Text)
+
+
+class StandardRelation(Base):
+    __tablename__ = "standard_relations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    current_standard_resource_id: Mapped[int | None] = mapped_column(ForeignKey("standard_resources.id"))
+    related_standard_resource_id: Mapped[int | None] = mapped_column(ForeignKey("standard_resources.id"))
+    current_standard_no: Mapped[str | None] = mapped_column(String(160), index=True)
+    related_standard_no: Mapped[str | None] = mapped_column(String(160), index=True)
+    relation_type: Mapped[str] = mapped_column(String(80), default="相关")
+    relation_text: Mapped[str | None] = mapped_column(Text)
+    source_url: Mapped[str | None] = mapped_column(Text)
+    discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    is_manual_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class StandardFileMatch(Base):
@@ -348,3 +396,18 @@ class SourceStatusSyncLog(Base):
     sync_action: Mapped[str | None] = mapped_column(String(120))
     sync_reason: Mapped[str | None] = mapped_column(Text)
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class CollectionTask(TimestampMixin, Base):
+    __tablename__ = "collection_tasks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    task_type: Mapped[str] = mapped_column(String(80), default="url_check")
+    status: Mapped[str] = mapped_column(String(40), default="pending", index=True)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    processed: Mapped[int] = mapped_column(Integer, default=0)
+    success: Mapped[int] = mapped_column(Integer, default=0)
+    failed: Mapped[int] = mapped_column(Integer, default=0)
+    message: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

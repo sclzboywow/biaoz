@@ -17,6 +17,7 @@ from app import models  # noqa: E402
 from app.database import Base, SessionLocal, engine  # noqa: E402
 from app.migrations import run_lightweight_migrations  # noqa: E402
 from app.settings_store import ensure_default_trusted_sources  # noqa: E402
+from app.standard_number import normalize_standard_no  # noqa: E402
 from app.status_calibration import attach_change_logs_to_documents, calibrate_resource_status  # noqa: E402
 
 
@@ -71,6 +72,14 @@ def upsert_resource(db, source, row, keys) -> tuple[bool, models.StandardResourc
         else None
     )
     resource.standard_no = standard_no or None
+    number_parts = normalize_standard_no(standard_no)
+    resource.raw_standard_no = number_parts.raw
+    resource.normalized_standard_no = number_parts.normalized
+    resource.standard_prefix = number_parts.prefix
+    resource.standard_main_no = number_parts.main_no
+    resource.standard_year = number_parts.year
+    resource.standard_revision_note = number_parts.revision_note
+    resource.source_status_raw = source_status or None
     resource.standard_name = standard_name
     resource.resource_type = "国标电子书库资源"
     resource.source_status = source_status or None

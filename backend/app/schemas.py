@@ -47,6 +47,15 @@ class UrlSourceOut(UrlSourceBase, OrmModel):
 class DocumentBase(BaseModel):
     title: str
     standard_no: str | None = None
+    raw_standard_no: str | None = None
+    normalized_standard_no: str | None = None
+    standard_prefix: str | None = None
+    standard_main_no: str | None = None
+    standard_year: str | None = None
+    standard_revision_note: str | None = None
+    source_status: str | None = None
+    system_status: str | None = None
+    manual_status: str | None = None
     doc_type: str | None = None
     category_id: int | None = None
     category: str | None = None
@@ -69,6 +78,15 @@ class DocumentCreate(DocumentBase):
 class DocumentUpdate(BaseModel):
     title: str | None = None
     standard_no: str | None = None
+    raw_standard_no: str | None = None
+    normalized_standard_no: str | None = None
+    standard_prefix: str | None = None
+    standard_main_no: str | None = None
+    standard_year: str | None = None
+    standard_revision_note: str | None = None
+    source_status: str | None = None
+    system_status: str | None = None
+    manual_status: str | None = None
     doc_type: str | None = None
     category_id: int | None = None
     category: str | None = None
@@ -189,6 +207,26 @@ class UrlCheckResult(BaseModel):
 class CheckAllResult(BaseModel):
     total: int
     results: list[UrlCheckResult]
+
+
+class CollectionTaskCreate(BaseModel):
+    include_manual: bool = False
+    batch_size: int = 50
+
+
+class CollectionTaskOut(OrmModel):
+    id: int
+    task_type: str
+    status: str
+    total: int
+    processed: int
+    success: int
+    failed: int
+    message: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime | None = None
 
 
 class PageResult(BaseModel):
@@ -326,6 +364,13 @@ class StandardResourceOut(OrmModel):
     source_book_id: str | None = None
     source_name: str | None = None
     standard_no: str | None = None
+    raw_standard_no: str | None = None
+    normalized_standard_no: str | None = None
+    standard_prefix: str | None = None
+    standard_main_no: str | None = None
+    standard_year: str | None = None
+    standard_revision_note: str | None = None
+    source_status_raw: str | None = None
     standard_name: str
     resource_type: str | None = None
     source_status: str | None = None
@@ -390,6 +435,34 @@ class SourceStatusSyncLogOut(OrmModel):
     synced_at: datetime
 
 
+class StandardEvidenceOut(OrmModel):
+    id: int
+    standard_resource_id: int | None = None
+    document_id: int | None = None
+    source_name: str | None = None
+    source_level: str | None = None
+    source_url: str | None = None
+    captured_at: datetime
+    raw_status_text: str | None = None
+    parsed_status: str | None = None
+    page_summary: str | None = None
+    page_html_hash: str | None = None
+    evidence_note: str | None = None
+
+
+class StandardRelationOut(OrmModel):
+    id: int
+    current_standard_resource_id: int | None = None
+    related_standard_resource_id: int | None = None
+    current_standard_no: str | None = None
+    related_standard_no: str | None = None
+    relation_type: str
+    relation_text: str | None = None
+    source_url: str | None = None
+    discovered_at: datetime
+    is_manual_confirmed: bool
+
+
 class MatchRunResult(BaseModel):
     matched: int
     skipped: int
@@ -400,9 +473,13 @@ class ResourceChainOut(BaseModel):
     matches: list[StandardFileMatchOut]
     documents: list[DocumentOut]
     versions: list[DocumentVersionOut]
+    url_sources: list[UrlSourceOut]
     change_logs: list[StandardChangeLogOut]
     sync_logs: list[SourceStatusSyncLogOut]
+    evidences: list[StandardEvidenceOut]
+    relations: list[StandardRelationOut]
     alerts: list[AlertOut]
+    processing_advice: str | None = None
 
 
 class DocumentChainOut(BaseModel):
@@ -410,9 +487,13 @@ class DocumentChainOut(BaseModel):
     versions: list[DocumentVersionOut]
     matches: list[StandardFileMatchOut]
     resources: list[StandardResourceOut]
+    url_sources: list[UrlSourceOut]
     change_logs: list[StandardChangeLogOut]
     sync_logs: list[SourceStatusSyncLogOut]
+    evidences: list[StandardEvidenceOut]
+    relations: list[StandardRelationOut]
     alerts: list[AlertOut]
+    processing_advice: str | None = None
 
 
 class GuobiaoSyncRequest(BaseModel):

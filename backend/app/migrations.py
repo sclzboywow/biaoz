@@ -14,6 +14,15 @@ SQLITE_COLUMNS: dict[str, dict[str, str]] = {
         "metadata_status": "VARCHAR(30) DEFAULT '系统识别'",
         "current_version_id": "INTEGER",
         "review_remark": "TEXT",
+        "raw_standard_no": "VARCHAR(160)",
+        "normalized_standard_no": "VARCHAR(160)",
+        "standard_prefix": "VARCHAR(40)",
+        "standard_main_no": "VARCHAR(80)",
+        "standard_year": "VARCHAR(10)",
+        "standard_revision_note": "VARCHAR(255)",
+        "source_status": "VARCHAR(80)",
+        "system_status": "VARCHAR(80)",
+        "manual_status": "VARCHAR(80)",
     },
     "document_versions": {
         "created_at": "DATETIME",
@@ -29,6 +38,13 @@ SQLITE_COLUMNS: dict[str, dict[str, str]] = {
     },
     "standard_resources": {
         "matched_document_count": "INTEGER DEFAULT 0",
+        "raw_standard_no": "VARCHAR(160)",
+        "normalized_standard_no": "VARCHAR(160)",
+        "standard_prefix": "VARCHAR(40)",
+        "standard_main_no": "VARCHAR(80)",
+        "standard_year": "VARCHAR(10)",
+        "standard_revision_note": "VARCHAR(255)",
+        "source_status_raw": "VARCHAR(160)",
     },
     "standard_change_logs": {
         "document_id": "INTEGER",
@@ -171,6 +187,52 @@ SQLITE_TABLES = [
         sync_action VARCHAR(120),
         sync_reason TEXT,
         synced_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS standard_evidence (
+        id INTEGER PRIMARY KEY,
+        standard_resource_id INTEGER,
+        document_id INTEGER,
+        source_name VARCHAR(120),
+        source_level VARCHAR(30),
+        source_url TEXT,
+        captured_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        raw_status_text VARCHAR(160),
+        parsed_status VARCHAR(80),
+        page_summary TEXT,
+        page_html_hash VARCHAR(128),
+        evidence_note TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS standard_relations (
+        id INTEGER PRIMARY KEY,
+        current_standard_resource_id INTEGER,
+        related_standard_resource_id INTEGER,
+        current_standard_no VARCHAR(160),
+        related_standard_no VARCHAR(160),
+        relation_type VARCHAR(80) DEFAULT '相关',
+        relation_text TEXT,
+        source_url TEXT,
+        discovered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        is_manual_confirmed BOOLEAN DEFAULT 0
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS collection_tasks (
+        id INTEGER PRIMARY KEY,
+        task_type VARCHAR(80) DEFAULT 'url_check',
+        status VARCHAR(40) DEFAULT 'pending',
+        total INTEGER DEFAULT 0,
+        processed INTEGER DEFAULT 0,
+        success INTEGER DEFAULT 0,
+        failed INTEGER DEFAULT 0,
+        message TEXT,
+        started_at DATETIME,
+        finished_at DATETIME,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
     """,
 ]

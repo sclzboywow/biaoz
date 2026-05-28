@@ -36,6 +36,11 @@
             <el-table-column prop="alert_type" label="类型" width="140" />
             <el-table-column prop="message" label="消息" />
             <el-table-column prop="status" label="状态" width="110" />
+            <el-table-column label="链路" width="110">
+              <template #default="{ row }">
+                <el-button size="small" :disabled="!row.document_id" @click.stop="openDocumentChainById(row.document_id)">文件链路</el-button>
+              </template>
+            </el-table-column>
           </el-table>
           <el-pagination layout="total, sizes, prev, pager, next" :total="alertTotal" v-model:current-page="alertQuery.page" v-model:page-size="alertQuery.page_size" :page-sizes="[20, 50, 100, 200]" @change="loadAlerts" />
         </div>
@@ -77,7 +82,10 @@
       <section v-if="activeView === 'collection'" class="panel">
         <div class="toolbar">
           <h2>文件采集管理</h2>
-          <el-button :icon="Refresh" :loading="checkingAll" @click="checkAllSources">执行非手动 URL 检查</el-button>
+          <div>
+            <el-button :icon="Refresh" @click="loadCollectionTasks">刷新任务</el-button>
+            <el-button type="primary" :loading="checkingAll" @click="createUrlCheckTask">创建后台检查任务</el-button>
+          </div>
         </div>
         <el-alert title="已导入的大批量 URL 默认是 manual，不会被后台自动下载。需要采集时可在 URL 来源管理中单条检查，或后续按分类/批次放开频率。" type="info" :closable="false" />
         <el-table :data="urlSources" :height="collectionTableHeight" style="margin-top: 14px">
@@ -88,6 +96,22 @@
           <el-table-column label="操作" width="120">
             <template #default="{ row }"><el-button size="small" @click="checkSource(row.id)">采集</el-button></template>
           </el-table-column>
+        </el-table>
+        <h3 class="section-title">后台任务进度</h3>
+        <el-table :data="collectionTasks" height="260">
+          <el-table-column prop="id" label="任务ID" width="90" />
+          <el-table-column prop="task_type" label="任务类型" width="120" />
+          <el-table-column prop="status" label="状态" width="110" />
+          <el-table-column label="进度" width="220">
+            <template #default="{ row }">
+              <el-progress :percentage="taskPercent(row)" :text-inside="true" :stroke-width="18" />
+            </template>
+          </el-table-column>
+          <el-table-column prop="success" label="成功" width="90" />
+          <el-table-column prop="failed" label="失败" width="90" />
+          <el-table-column prop="message" label="说明" min-width="260" show-overflow-tooltip />
+          <el-table-column prop="started_at" label="开始时间" width="180" />
+          <el-table-column prop="finished_at" label="完成时间" width="180" />
         </el-table>
       </section>
 
@@ -185,8 +209,9 @@
           <el-table-column prop="message" label="消息" min-width="320" show-overflow-tooltip />
           <el-table-column prop="status" label="状态" width="110" />
           <el-table-column prop="created_at" label="创建时间" width="180" />
-          <el-table-column label="操作" width="170" fixed="right">
+          <el-table-column label="操作" width="260" fixed="right">
             <template #default="{ row }">
+              <el-button size="small" :disabled="!row.document_id" @click.stop="openDocumentChainById(row.document_id)">文件链路</el-button>
               <el-button size="small" type="success" :disabled="row.status !== '未处理'" @click="setAlertStatus(row.id, '已处理')">处理</el-button>
               <el-button size="small" :disabled="row.status !== '未处理'" @click="setAlertStatus(row.id, '忽略')">忽略</el-button>
             </template>
@@ -317,6 +342,12 @@
           <el-table-column prop="match_reason" label="原因" min-width="260" />
           <el-table-column prop="status" label="状态" width="120" />
           <el-table-column prop="matched_at" label="匹配时间" width="180" />
+          <el-table-column label="链路" width="210" fixed="right">
+            <template #default="{ row }">
+              <el-button size="small" @click.stop="openDocumentChainById(row.document_id)">文件</el-button>
+              <el-button size="small" @click.stop="openResourceChainById(row.standard_resource_id)">资源</el-button>
+            </template>
+          </el-table-column>
         </el-table>
       </section>
 
@@ -333,6 +364,12 @@
           <el-table-column prop="sync_action" label="动作" width="150" />
           <el-table-column prop="sync_reason" label="原因/证据" min-width="360" show-overflow-tooltip />
           <el-table-column prop="synced_at" label="同步时间" width="180" />
+          <el-table-column label="链路" width="210" fixed="right">
+            <template #default="{ row }">
+              <el-button size="small" :disabled="!row.document_id" @click.stop="openDocumentChainById(row.document_id)">文件</el-button>
+              <el-button size="small" @click.stop="openResourceChainById(row.standard_resource_id)">资源</el-button>
+            </template>
+          </el-table-column>
         </el-table>
       </section>
 
@@ -352,6 +389,12 @@
           <el-table-column prop="handled_status" label="处理状态" width="120" />
           <el-table-column prop="evidence_summary" label="证据链" min-width="280" show-overflow-tooltip />
           <el-table-column prop="detected_at" label="发现时间" width="180" />
+          <el-table-column label="链路" width="210" fixed="right">
+            <template #default="{ row }">
+              <el-button size="small" :disabled="!row.document_id" @click.stop="openDocumentChainById(row.document_id)">文件</el-button>
+              <el-button size="small" @click.stop="openResourceChainById(row.standard_resource_id)">资源</el-button>
+            </template>
+          </el-table-column>
         </el-table>
       </section>
     </el-main>
@@ -397,61 +440,170 @@
     <template #footer><el-button @click="showDocumentDialog = false">取消</el-button><el-button type="primary" @click="createDocument">保存</el-button></template>
   </el-dialog>
 
-  <el-drawer v-model="chainDrawerVisible" :title="chainTitle" size="58%">
-    <section v-if="resourceChain">
-      <h3>可信源资源</h3>
+  <el-drawer v-model="chainDrawerVisible" :title="chainTitle" size="68%">
+    <section v-if="resourceChain" class="chain-detail">
+      <h3>可信源资源详情</h3>
+      <el-alert v-if="resourceChain.processing_advice" :title="resourceChain.processing_advice" type="warning" :closable="false" class="chain-advice" />
       <el-descriptions :column="2" border>
-        <el-descriptions-item label="编号">{{ resourceChain.resource.standard_no }}</el-descriptions-item>
-        <el-descriptions-item label="名称">{{ resourceChain.resource.standard_name }}</el-descriptions-item>
-        <el-descriptions-item label="可信源状态">{{ resourceChain.resource.source_status }}</el-descriptions-item>
-        <el-descriptions-item label="系统状态">{{ resourceChain.resource.system_status }}</el-descriptions-item>
-        <el-descriptions-item label="详情页" :span="2">{{ resourceChain.resource.detail_url }}</el-descriptions-item>
+        <el-descriptions-item label="标准编号">{{ resourceChain.resource.standard_no }}</el-descriptions-item>
+        <el-descriptions-item label="规范编号">{{ resourceChain.resource.normalized_standard_no }}</el-descriptions-item>
+        <el-descriptions-item label="标准名称">{{ resourceChain.resource.standard_name }}</el-descriptions-item>
+        <el-descriptions-item label="资源类型">{{ resourceChain.resource.resource_type }}</el-descriptions-item>
+        <el-descriptions-item label="来源状态">{{ resourceChain.resource.source_status }}</el-descriptions-item>
+        <el-descriptions-item label="系统判断">{{ resourceChain.resource.system_status }}</el-descriptions-item>
+        <el-descriptions-item label="人工复核">{{ resourceChain.resource.manual_status || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="废止日期">{{ resourceChain.resource.abolish_date || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="来源详情页" :span="2">
+          <a v-if="resourceChain.resource.detail_url" :href="resourceChain.resource.detail_url" target="_blank">{{ resourceChain.resource.detail_url }}</a>
+          <span v-else>-</span>
+        </el-descriptions-item>
       </el-descriptions>
-      <chain-section title="匹配本地文件" :data="resourceChain.documents" />
-      <chain-section title="版本记录" :data="resourceChain.versions" />
-      <chain-section title="状态同步记录" :data="resourceChain.sync_logs" />
-      <chain-section title="变更记录" :data="resourceChain.change_logs" />
-      <chain-section title="提醒" :data="resourceChain.alerts" />
+
+      <h3 class="section-title">匹配的本地文件</h3>
+      <el-table :data="resourceChain.documents" height="220">
+        <el-table-column prop="standard_no" label="编号" width="150" />
+        <el-table-column prop="title" label="文件名称" min-width="320" show-overflow-tooltip />
+        <el-table-column prop="source_status" label="来源状态" width="120" />
+        <el-table-column prop="system_status" label="系统判断" width="140" />
+        <el-table-column prop="manual_status" label="人工复核" width="120" />
+        <el-table-column label="操作" width="110">
+          <template #default="{ row }"><el-button size="small" @click.stop="openDocumentChainById(row.id)">文件链路</el-button></template>
+        </el-table-column>
+      </el-table>
+
+      <chain-tables
+        :versions="resourceChain.versions"
+        :url-sources="resourceChain.url_sources"
+        :sync-logs="resourceChain.sync_logs"
+        :change-logs="resourceChain.change_logs"
+        :evidences="resourceChain.evidences"
+        :relations="resourceChain.relations"
+        :alerts="resourceChain.alerts"
+      />
     </section>
-    <section v-if="documentChain">
-      <h3>本地文件</h3>
+
+    <section v-if="documentChain" class="chain-detail">
+      <h3>文件链路详情</h3>
+      <el-alert v-if="documentChain.processing_advice" :title="documentChain.processing_advice" type="warning" :closable="false" class="chain-advice" />
       <el-descriptions :column="2" border>
-        <el-descriptions-item label="编号">{{ documentChain.document.standard_no }}</el-descriptions-item>
-        <el-descriptions-item label="标题">{{ documentChain.document.title }}</el-descriptions-item>
-        <el-descriptions-item label="文件状态">{{ documentChain.document.valid_status }}</el-descriptions-item>
-        <el-descriptions-item label="复核状态">{{ documentChain.document.review_status }}</el-descriptions-item>
+        <el-descriptions-item label="文件名称">{{ documentChain.document.title }}</el-descriptions-item>
+        <el-descriptions-item label="标准编号">{{ documentChain.document.standard_no }}</el-descriptions-item>
+        <el-descriptions-item label="规范编号">{{ documentChain.document.normalized_standard_no }}</el-descriptions-item>
+        <el-descriptions-item label="当前版本">{{ documentChain.document.current_version_id || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="来源状态">{{ documentChain.document.source_status || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="系统判断">{{ documentChain.document.system_status || documentChain.document.valid_status }}</el-descriptions-item>
+        <el-descriptions-item label="人工复核">{{ documentChain.document.manual_status || documentChain.document.review_status }}</el-descriptions-item>
+        <el-descriptions-item label="元数据">{{ documentChain.document.metadata_status || '-' }}</el-descriptions-item>
       </el-descriptions>
-      <chain-section title="匹配可信源资源" :data="documentChain.resources" />
-      <chain-section title="版本记录" :data="documentChain.versions" />
-      <chain-section title="状态同步记录" :data="documentChain.sync_logs" />
-      <chain-section title="变更记录" :data="documentChain.change_logs" />
-      <chain-section title="提醒" :data="documentChain.alerts" />
+
+      <h3 class="section-title">匹配的可信源标准</h3>
+      <el-table :data="documentChain.resources" height="220">
+        <el-table-column prop="standard_no" label="编号" width="150" />
+        <el-table-column prop="standard_name" label="标准名称" min-width="320" show-overflow-tooltip />
+        <el-table-column prop="source_status" label="来源状态" width="120" />
+        <el-table-column prop="system_status" label="系统判断" width="140" />
+        <el-table-column prop="abolish_date" label="废止日期" width="120" />
+        <el-table-column label="操作" width="110">
+          <template #default="{ row }"><el-button size="small" @click.stop="openResourceChainById(row.id)">资源链路</el-button></template>
+        </el-table-column>
+      </el-table>
+
+      <chain-tables
+        :versions="documentChain.versions"
+        :url-sources="documentChain.url_sources"
+        :sync-logs="documentChain.sync_logs"
+        :change-logs="documentChain.change_logs"
+        :evidences="documentChain.evidences"
+        :relations="documentChain.relations"
+        :alerts="documentChain.alerts"
+      />
     </section>
   </el-drawer>
 </template>
 
 <script setup lang="ts">
-import { defineComponent, h, onMounted, reactive, ref } from 'vue'
+import { defineComponent, onMounted, reactive, ref } from 'vue'
 import { Aim, Bell, CircleCheck, DataBoard, Document, Download, Files, Link, Medal, Plus, Refresh, Search, Setting, Switch, Warning } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { api, type Alert, type DocumentChain, type DocumentItem, type DocumentVersion, type Page, type ResourceChain, type SourceCategory, type SourceStatusSyncLog, type StandardChangeLog, type StandardFileMatch, type StandardResource, type StorageBrowse, type StorageStatus, type SystemSetting, type TrustedSource, type UrlSource } from './api'
+import { api, type Alert, type CollectionTask, type DocumentChain, type DocumentItem, type DocumentVersion, type Page, type ResourceChain, type SourceCategory, type SourceStatusSyncLog, type StandardChangeLog, type StandardFileMatch, type StandardResource, type StorageBrowse, type StorageStatus, type SystemSetting, type TrustedSource, type UrlSource } from './api'
 
-const ChainSection = defineComponent({
+const ChainTables = defineComponent({
   props: {
-    title: { type: String, required: true },
-    data: { type: Array, required: true },
+    versions: { type: Array, required: true },
+    urlSources: { type: Array, required: true },
+    syncLogs: { type: Array, required: true },
+    changeLogs: { type: Array, required: true },
+    evidences: { type: Array, required: true },
+    relations: { type: Array, required: true },
+    alerts: { type: Array, required: true },
   },
-  setup(props) {
-    return () =>
-      h('section', { class: 'chain-section' }, [
-        h('h3', props.title),
-        h(
-          'pre',
-          { class: 'chain-json' },
-          JSON.stringify(props.data, null, 2),
-        ),
-      ])
-  },
+  template: `
+    <h3 class="section-title">来源 URL</h3>
+    <el-table :data="urlSources" height="180">
+      <el-table-column prop="source_name" label="来源名称" width="220" show-overflow-tooltip />
+      <el-table-column prop="url" label="URL" min-width="360" show-overflow-tooltip />
+      <el-table-column prop="status" label="状态" width="100" />
+      <el-table-column prop="last_checked_at" label="最后检查" width="180" />
+    </el-table>
+
+    <h3 class="section-title">版本记录</h3>
+    <el-table :data="versions" height="220">
+      <el-table-column prop="version_no" label="版本" width="90" />
+      <el-table-column prop="file_name" label="文件名" min-width="280" show-overflow-tooltip />
+      <el-table-column prop="change_type" label="变化" width="100" />
+      <el-table-column prop="is_current" label="当前" width="90" />
+      <el-table-column prop="file_hash" label="文件哈希" min-width="240" show-overflow-tooltip />
+      <el-table-column prop="downloaded_at" label="下载时间" width="180" />
+    </el-table>
+
+    <h3 class="section-title">状态同步记录</h3>
+    <el-table :data="syncLogs" height="220">
+      <el-table-column prop="old_status" label="原状态" width="140" />
+      <el-table-column prop="new_status" label="新状态" width="140" />
+      <el-table-column prop="sync_action" label="动作" width="150" />
+      <el-table-column prop="sync_reason" label="原因/证据" min-width="420" show-overflow-tooltip />
+      <el-table-column prop="synced_at" label="同步时间" width="180" />
+    </el-table>
+
+    <h3 class="section-title">变更记录</h3>
+    <el-table :data="changeLogs" height="220">
+      <el-table-column prop="field_name" label="字段" width="150" />
+      <el-table-column prop="change_type" label="变化类型" width="130" />
+      <el-table-column prop="old_value" label="旧值" min-width="220" show-overflow-tooltip />
+      <el-table-column prop="new_value" label="新值" min-width="220" show-overflow-tooltip />
+      <el-table-column prop="evidence_summary" label="证据说明" min-width="260" show-overflow-tooltip />
+      <el-table-column prop="detected_at" label="发现时间" width="180" />
+    </el-table>
+
+    <h3 class="section-title">证据记录</h3>
+    <el-table :data="evidences" height="220">
+      <el-table-column prop="source_name" label="来源网站" width="160" />
+      <el-table-column prop="source_level" label="等级" width="80" />
+      <el-table-column prop="raw_status_text" label="原始状态" width="120" />
+      <el-table-column prop="parsed_status" label="解析结果" width="140" />
+      <el-table-column prop="evidence_note" label="证据说明" min-width="360" show-overflow-tooltip />
+      <el-table-column prop="source_url" label="原始 URL" min-width="280" show-overflow-tooltip />
+      <el-table-column prop="captured_at" label="抓取时间" width="180" />
+    </el-table>
+
+    <h3 class="section-title">替代/相关关系</h3>
+    <el-table :data="relations" height="180">
+      <el-table-column prop="current_standard_no" label="当前标准" width="160" />
+      <el-table-column prop="related_standard_no" label="关联标准" width="160" />
+      <el-table-column prop="relation_type" label="关系类型" width="120" />
+      <el-table-column prop="relation_text" label="关系原文" min-width="360" show-overflow-tooltip />
+      <el-table-column prop="source_url" label="来源 URL" min-width="260" show-overflow-tooltip />
+    </el-table>
+
+    <h3 class="section-title">提醒记录</h3>
+    <el-table :data="alerts" height="180">
+      <el-table-column prop="alert_level" label="等级" width="90" />
+      <el-table-column prop="alert_type" label="类型" width="140" />
+      <el-table-column prop="message" label="消息" min-width="360" show-overflow-tooltip />
+      <el-table-column prop="status" label="状态" width="110" />
+      <el-table-column prop="created_at" label="创建时间" width="180" />
+    </el-table>
+  `,
 })
 
 const activeView = ref('dashboard')
@@ -460,6 +612,7 @@ const documents = ref<DocumentItem[]>([])
 const alerts = ref<Alert[]>([])
 const versions = ref<DocumentVersion[]>([])
 const systemSettings = ref<SystemSetting[]>([])
+const collectionTasks = ref<CollectionTask[]>([])
 const storageStatus = ref<StorageStatus | null>(null)
 const trustedSources = ref<TrustedSource[]>([])
 const sourceCategories = ref<SourceCategory[]>([])
@@ -529,13 +682,14 @@ async function loadCounts() {
 }
 
 async function loadAll() {
-  await Promise.all([loadUrlSources(), loadDocuments(), loadAlerts(), loadCounts()])
+  await Promise.all([loadUrlSources(), loadDocuments(), loadAlerts(), loadCounts(), loadCollectionTasks()])
 }
 
 function switchView(view: string) {
   activeView.value = view
   if (view === 'review') loadPendingReview()
   if (view === 'settings') loadSettings()
+  if (view === 'collection') loadCollectionTasks()
   if (view === 'trustedResources') loadTrustedResources()
   if (view === 'fileMatches') loadFileMatches()
   if (view === 'sourceChanges') loadSourceChanges()
@@ -571,6 +725,27 @@ async function checkAllSources() {
   }
 }
 
+async function loadCollectionTasks() {
+  const res = await api.get<CollectionTask[]>('/collection-tasks')
+  collectionTasks.value = res.data
+}
+
+async function createUrlCheckTask() {
+  checkingAll.value = true
+  try {
+    const res = await api.post<CollectionTask>('/collection-tasks/url-check', { include_manual: false, batch_size: 50 })
+    ElMessage.success(`已创建后台检查任务 #${res.data.id}`)
+    await loadCollectionTasks()
+  } finally {
+    checkingAll.value = false
+  }
+}
+
+function taskPercent(row: CollectionTask) {
+  if (!row.total) return row.status === 'finished' ? 100 : 0
+  return Math.min(100, Math.round((row.processed / row.total) * 100))
+}
+
 async function createDocument() {
   await api.post('/documents', documentForm)
   showDocumentDialog.value = false
@@ -596,19 +771,30 @@ async function selectDocument(row: DocumentItem) {
 }
 
 async function openResourceChain(row: StandardResource) {
-  const res = await api.get<ResourceChain>(`/standard-resources/${row.id}/chain`)
+  await openResourceChainById(row.id)
+}
+
+async function openResourceChainById(id?: number) {
+  if (!id) return
+  const res = await api.get<ResourceChain>(`/standard-resources/${id}/chain`)
   resourceChain.value = res.data
   documentChain.value = null
-  chainTitle.value = `资源链路：${row.standard_no || ''} ${row.standard_name}`
+  chainTitle.value = `资源链路：${res.data.resource.standard_no || ''} ${res.data.resource.standard_name}`
   chainDrawerVisible.value = true
 }
 
 async function openDocumentChain(row: DocumentItem) {
   selectedDocumentId.value = row.id
-  const res = await api.get<DocumentChain>(`/documents/${row.id}/chain`)
+  await openDocumentChainById(row.id)
+}
+
+async function openDocumentChainById(id?: number) {
+  if (!id) return
+  selectedDocumentId.value = id
+  const res = await api.get<DocumentChain>(`/documents/${id}/chain`)
   documentChain.value = res.data
   resourceChain.value = null
-  chainTitle.value = `文件链路：${row.standard_no || ''} ${row.title}`
+  chainTitle.value = `文件链路：${res.data.document.standard_no || ''} ${res.data.document.title}`
   chainDrawerVisible.value = true
 }
 

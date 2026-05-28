@@ -21,6 +21,15 @@ export type DocumentItem = {
   id: number
   title: string
   standard_no?: string
+  raw_standard_no?: string
+  normalized_standard_no?: string
+  standard_prefix?: string
+  standard_main_no?: string
+  standard_year?: string
+  standard_revision_note?: string
+  source_status?: string
+  system_status?: string
+  manual_status?: string
   doc_type?: string
   category?: string
   valid_status: string
@@ -32,6 +41,8 @@ export type DocumentItem = {
 
 export type Alert = {
   id: number
+  document_id?: number
+  url_source_id?: number
   alert_type: string
   alert_level: string
   message: string
@@ -91,6 +102,21 @@ export type StorageBrowse = {
   directories: StorageDirectoryItem[]
 }
 
+export type CollectionTask = {
+  id: number
+  task_type: string
+  status: string
+  total: number
+  processed: number
+  success: number
+  failed: number
+  message?: string
+  started_at?: string
+  finished_at?: string
+  created_at: string
+  updated_at?: string
+}
+
 export type TrustedSource = {
   id: number
   source_name: string
@@ -128,6 +154,13 @@ export type SourceCategory = {
 export type StandardResource = {
   id: number
   standard_no?: string
+  raw_standard_no?: string
+  normalized_standard_no?: string
+  standard_prefix?: string
+  standard_main_no?: string
+  standard_year?: string
+  standard_revision_note?: string
+  source_status_raw?: string
   standard_name: string
   resource_type?: string
   source_status?: string
@@ -177,14 +210,46 @@ export type SourceStatusSyncLog = {
   synced_at: string
 }
 
+export type StandardEvidence = {
+  id: number
+  standard_resource_id?: number
+  document_id?: number
+  source_name?: string
+  source_level?: string
+  source_url?: string
+  captured_at: string
+  raw_status_text?: string
+  parsed_status?: string
+  page_summary?: string
+  page_html_hash?: string
+  evidence_note?: string
+}
+
+export type StandardRelation = {
+  id: number
+  current_standard_resource_id?: number
+  related_standard_resource_id?: number
+  current_standard_no?: string
+  related_standard_no?: string
+  relation_type: string
+  relation_text?: string
+  source_url?: string
+  discovered_at: string
+  is_manual_confirmed: boolean
+}
+
 export type ResourceChain = {
   resource: StandardResource
   matches: StandardFileMatch[]
   documents: DocumentItem[]
   versions: DocumentVersion[]
+  url_sources: UrlSource[]
   change_logs: StandardChangeLog[]
   sync_logs: SourceStatusSyncLog[]
+  evidences: StandardEvidence[]
+  relations: StandardRelation[]
   alerts: Alert[]
+  processing_advice?: string
 }
 
 export type DocumentChain = {
@@ -192,7 +257,11 @@ export type DocumentChain = {
   versions: DocumentVersion[]
   matches: StandardFileMatch[]
   resources: StandardResource[]
+  url_sources: UrlSource[]
   change_logs: StandardChangeLog[]
   sync_logs: SourceStatusSyncLog[]
+  evidences: StandardEvidence[]
+  relations: StandardRelation[]
   alerts: Alert[]
+  processing_advice?: string
 }

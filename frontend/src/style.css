@@ -64,19 +64,20 @@ body {
   margin-left: 0;
 }
 
-.chain-section {
-  margin-top: 18px;
+.chain-detail {
+  padding-bottom: 24px;
 }
 
-.chain-json {
-  max-height: 220px;
-  overflow: auto;
-  padding: 12px;
-  border: 1px solid #e5e7eb;
-  border-radius: 6px;
-  background: #f8fafc;
-  font-size: 12px;
-  line-height: 1.5;
+.chain-detail .el-table {
+  margin-bottom: 10px;
+}
+
+.chain-advice {
+  margin: 8px 0 14px;
+}
+
+.chain-section {
+  margin-top: 18px;
 }
 
 .storage-alert {
