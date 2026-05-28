@@ -10,9 +10,8 @@ BACKEND = ROOT / "backend"
 sys.path.insert(0, str(BACKEND))
 os.chdir(BACKEND)
 
-from app.database import Base, SessionLocal, engine  # noqa: E402
+from app.database import SessionLocal  # noqa: E402
 from app.guobiao_sync import sync_guobiao_resources  # noqa: E402
-from app.migrations import run_lightweight_migrations  # noqa: E402
 from app.settings_store import ensure_default_trusted_sources  # noqa: E402
 
 
@@ -24,8 +23,6 @@ def main() -> None:
     parser.add_argument("--all-pages", action="store_true")
     args = parser.parse_args()
 
-    Base.metadata.create_all(bind=engine)
-    run_lightweight_migrations()
     with SessionLocal() as db:
         ensure_default_trusted_sources(db)
         stats = sync_guobiao_resources(

@@ -16,7 +16,7 @@ if (-not (Test-Path (Join-Path $backend ".venv"))) {
 & (Join-Path $backend ".venv\Scripts\python.exe") -m pip install --upgrade pip
 & (Join-Path $backend ".venv\Scripts\python.exe") -m pip install -r (Join-Path $backend "requirements.txt")
 
-$envText = "APP_NAME=标准规范与项目依据动态管理系统`nAPI_PREFIX=/api/v1`nDATABASE_URL=sqlite:///./data/biaoz.db`nSTORAGE_ROOT=./data/standard-docs`nCORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173`n"
+$envText = "APP_NAME=标准规范与项目依据动态管理系统`nAPI_PREFIX=/api/v1`nDATABASE_URL=postgresql+psycopg://biaoz:biaoz@localhost:5432/biaoz`nSTORAGE_ROOT=./data/standard-docs`nCORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173`n"
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText((Join-Path $backend ".env"), $envText, $utf8NoBom)
 

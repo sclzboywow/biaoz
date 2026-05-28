@@ -7,7 +7,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     app_name: str = "标准规范与项目依据动态管理系统"
     api_prefix: str = "/api/v1"
-    database_url: str = "sqlite:///./data/biaoz.db"
+    database_url: str = "postgresql+psycopg://biaoz:biaoz@localhost:5432/biaoz"
+    allow_sqlite: bool = False
     storage_root: Path = Path("./data/standard-docs")
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     url_check_interval_seconds: int = 3600

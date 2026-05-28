@@ -9,7 +9,10 @@ ModelT = TypeVar("ModelT", bound=Base)
 
 
 def list_items(db: Session, model: type[ModelT], skip: int = 0, limit: int = 50) -> list[ModelT]:
-    return list(db.scalars(select(model).offset(skip).limit(limit)))
+    statement = select(model).order_by(model.id.desc()).limit(limit)  # type: ignore[attr-defined]
+    if skip:
+        statement = statement.where(model.id < skip)  # type: ignore[attr-defined]
+    return list(db.scalars(statement))
 
 
 def get_item(db: Session, model: type[ModelT], item_id: int) -> ModelT | None:

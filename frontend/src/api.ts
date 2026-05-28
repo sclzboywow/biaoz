@@ -55,6 +55,8 @@ export type Alert = {
 export type Page<T> = {
   total: number
   items: T[]
+  next_cursor?: number
+  has_more?: boolean
 }
 
 export type DocumentVersion = {

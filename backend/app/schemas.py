@@ -242,16 +242,22 @@ class PageResult(BaseModel):
 class UrlSourcePage(BaseModel):
     total: int
     items: list[UrlSourceOut]
+    next_cursor: int | None = None
+    has_more: bool = False
 
 
 class DocumentPage(BaseModel):
     total: int
     items: list[DocumentOut]
+    next_cursor: int | None = None
+    has_more: bool = False
 
 
 class AlertPage(BaseModel):
     total: int
     items: list[AlertOut]
+    next_cursor: int | None = None
+    has_more: bool = False
 
 
 class CheckLogOut(OrmModel):
@@ -270,6 +276,8 @@ class CheckLogOut(OrmModel):
 class CheckLogPage(BaseModel):
     total: int
     items: list[CheckLogOut]
+    next_cursor: int | None = None
+    has_more: bool = False
 
 
 class CategoryCreate(BaseModel):
@@ -355,6 +363,8 @@ class SourceCategoryOut(OrmModel):
 class SourceCategoryPage(BaseModel):
     total: int
     items: list[SourceCategoryOut]
+    next_cursor: int | None = None
+    has_more: bool = False
 
 
 class CategoryDiscoveryResult(BaseModel):
@@ -400,6 +410,8 @@ class StandardResourceOut(OrmModel):
 class StandardResourcePage(BaseModel):
     total: int
     items: list[StandardResourceOut]
+    next_cursor: int | None = None
+    has_more: bool = False
 
 
 class StandardFileMatchOut(OrmModel):
@@ -477,6 +489,9 @@ class StandardRelationUpdate(BaseModel):
 class MatchRunResult(BaseModel):
     matched: int
     skipped: int
+    processed: int = 0
+    next_cursor: int | None = None
+    has_more: bool = False
 
 
 class ResourceChainOut(BaseModel):

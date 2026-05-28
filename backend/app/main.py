@@ -11,10 +11,9 @@ from sqlalchemy.orm import Session
 
 from app import crud, models, schemas
 from app.config import get_settings
-from app.database import Base, SessionLocal, engine, get_db
+from app.database import SessionLocal, get_db
 from app.guobiao_discovery import sync_discovered_sublibs
 from app.guobiao_sync import sync_guobiao_resources  # noqa: F401  # imports and registers guobiao adapter
-from app.migrations import run_lightweight_migrations
 from app.scheduler import run_url_check_loop
 from app.settings_store import ensure_default_settings, ensure_default_trusted_sources, get_bool_setting, get_int_setting
 from app.standard_number import normalize_standard_no
@@ -37,8 +36,6 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup() -> None:
-    Base.metadata.create_all(bind=engine)
-    run_lightweight_migrations()
     with SessionLocal() as db:
         ensure_default_settings(db)
         ensure_default_trusted_sources(db)
@@ -98,6 +95,31 @@ def chain_processing_advice(
         return "可信源显示现行，当前无明显异常，建议保持定期同步。"
     return "状态证据不足，建议补充可信源详情或人工复核。"
 
+def cursor_window(db: Session, statement, id_column, page_size: int, cursor: int | None):
+    limit = min(max(page_size, 1), 200)
+    if cursor:
+        statement = statement.where(id_column < cursor)
+    rows = list(db.scalars(statement.order_by(desc(id_column)).limit(limit + 1)))
+    has_more = len(rows) > limit
+    items = rows[:limit]
+    next_cursor = items[-1].id if has_more and items else None
+    return items, next_cursor, has_more
+
+
+def stream_url_source_ids(db: Session, include_manual: bool, batch_size: int, start_after_id: int = 0):
+    last_id = start_after_id
+    size = min(max(batch_size, 1), 500)
+    while True:
+        statement = select(models.UrlSource.id).where(models.UrlSource.id > last_id)
+        if not include_manual:
+            statement = statement.where(models.UrlSource.check_frequency != "manual")
+        ids = list(db.scalars(statement.order_by(models.UrlSource.id).limit(size)))
+        if not ids:
+            break
+        yield ids
+        last_id = ids[-1]
+
+
 @api.get("/url-sources", response_model=list[schemas.UrlSourceOut])
 def list_url_sources(skip: int = 0, limit: int = 50, db: Session = Depends(get_db)):
     return crud.list_items(db, models.UrlSource, skip, limit)
@@ -107,13 +129,13 @@ def list_url_sources(skip: int = 0, limit: int = 50, db: Session = Depends(get_d
 def page_url_sources(
     page: int = 1,
     page_size: int = 50,
+    cursor: int | None = None,
     q: str | None = None,
     status: str | None = None,
     source_type: str | None = None,
     check_frequency: str | None = None,
     db: Session = Depends(get_db),
 ):
-    page = max(page, 1)
     page_size = min(max(page_size, 1), 200)
     statement = select(models.UrlSource)
     count_statement = select(func.count(models.UrlSource.id))
@@ -137,10 +159,8 @@ def page_url_sources(
         statement = statement.where(item)
         count_statement = count_statement.where(item)
     total = db.scalar(count_statement) or 0
-    items = list(
-        db.scalars(statement.order_by(desc(models.UrlSource.id)).offset((page - 1) * page_size).limit(page_size))
-    )
-    return schemas.UrlSourcePage(total=total, items=items)
+    items, next_cursor, has_more = cursor_window(db, statement, models.UrlSource.id, page_size, cursor)
+    return schemas.UrlSourcePage(total=total, items=items, next_cursor=next_cursor, has_more=has_more)
 
 
 @api.post("/url-sources", response_model=schemas.UrlSourceOut)
@@ -169,12 +189,18 @@ def check_one_url_source(source_id: int, db: Session = Depends(get_db)):
 def check_all_url_sources(include_manual: bool = False, db: Session = Depends(get_db)):
     include_manual = include_manual or get_bool_setting(db, "check_manual_in_batch", False)
     timeout_seconds = get_int_setting(db, "download_timeout_seconds", 30)
-    statement = select(models.UrlSource).order_by(models.UrlSource.id)
-    if not include_manual:
-        statement = statement.where(models.UrlSource.check_frequency != "manual")
-    sources = list(db.scalars(statement))
-    results = [check_url_source(db, source, settings.storage_root, timeout_seconds) for source in sources]
-    return schemas.CheckAllResult(total=len(results), results=results)
+    total = 0
+    results: list[schemas.UrlCheckResult] = []
+    for source_ids in stream_url_source_ids(db, include_manual, 100):
+        for source_id in source_ids:
+            source = db.get(models.UrlSource, source_id)
+            if source is None:
+                continue
+            result = check_url_source(db, source, settings.storage_root, timeout_seconds)
+            total += 1
+            if len(results) < 200:
+                results.append(result)
+    return schemas.CheckAllResult(total=total, results=results)
 
 
 def run_url_check_task(task_id: int, include_manual: bool, batch_size: int) -> None:
@@ -196,13 +222,7 @@ def run_url_check_task(task_id: int, include_manual: bool, batch_size: int) -> N
         db.commit()
 
         try:
-            while True:
-                statement = select(models.UrlSource.id).where(models.UrlSource.id > (task.last_source_id or 0)).order_by(models.UrlSource.id).limit(max(batch_size, 1))
-                if not include_manual:
-                    statement = statement.where(models.UrlSource.check_frequency != "manual")
-                source_ids = list(db.scalars(statement))
-                if not source_ids:
-                    break
+            for source_ids in stream_url_source_ids(db, include_manual, batch_size, task.last_source_id or 0):
                 for source_id in source_ids:
                     source = db.get(models.UrlSource, source_id)
                     if source is None:
@@ -270,8 +290,11 @@ def resume_collection_task(task_id: int, background_tasks: BackgroundTasks, db: 
 
 
 @api.get("/collection-tasks", response_model=list[schemas.CollectionTaskOut])
-def list_collection_tasks(skip: int = 0, limit: int = 20, db: Session = Depends(get_db)):
-    return list(db.scalars(select(models.CollectionTask).order_by(desc(models.CollectionTask.id)).offset(skip).limit(limit)))
+def list_collection_tasks(cursor: int | None = None, limit: int = 20, db: Session = Depends(get_db)):
+    statement = select(models.CollectionTask)
+    if cursor:
+        statement = statement.where(models.CollectionTask.id < cursor)
+    return list(db.scalars(statement.order_by(desc(models.CollectionTask.id)).limit(min(max(limit, 1), 100))))
 
 
 @api.get("/documents", response_model=list[schemas.DocumentOut])
@@ -283,6 +306,7 @@ def list_documents(skip: int = 0, limit: int = 50, db: Session = Depends(get_db)
 def page_documents(
     page: int = 1,
     page_size: int = 50,
+    cursor: int | None = None,
     q: str | None = None,
     valid_status: str | None = None,
     review_status: str | None = None,
@@ -292,7 +316,6 @@ def page_documents(
     doc_type: str | None = None,
     db: Session = Depends(get_db),
 ):
-    page = max(page, 1)
     page_size = min(max(page_size, 1), 200)
     statement = select(models.Document)
     count_statement = select(func.count(models.Document.id))
@@ -324,8 +347,8 @@ def page_documents(
         statement = statement.where(item)
         count_statement = count_statement.where(item)
     total = db.scalar(count_statement) or 0
-    items = list(db.scalars(statement.order_by(desc(models.Document.id)).offset((page - 1) * page_size).limit(page_size)))
-    return schemas.DocumentPage(total=total, items=items)
+    items, next_cursor, has_more = cursor_window(db, statement, models.Document.id, page_size, cursor)
+    return schemas.DocumentPage(total=total, items=items, next_cursor=next_cursor, has_more=has_more)
 
 
 @api.post("/documents", response_model=schemas.DocumentOut)
@@ -445,13 +468,13 @@ def list_alerts(skip: int = 0, limit: int = 50, db: Session = Depends(get_db)):
 def page_alerts(
     page: int = 1,
     page_size: int = 50,
+    cursor: int | None = None,
     q: str | None = None,
     status: str | None = None,
     alert_type: str | None = None,
     alert_level: str | None = None,
     db: Session = Depends(get_db),
 ):
-    page = max(page, 1)
     page_size = min(max(page_size, 1), 200)
     statement = select(models.Alert)
     count_statement = select(func.count(models.Alert.id))
@@ -468,8 +491,8 @@ def page_alerts(
         statement = statement.where(item)
         count_statement = count_statement.where(item)
     total = db.scalar(count_statement) or 0
-    items = list(db.scalars(statement.order_by(desc(models.Alert.id)).offset((page - 1) * page_size).limit(page_size)))
-    return schemas.AlertPage(total=total, items=items)
+    items, next_cursor, has_more = cursor_window(db, statement, models.Alert.id, page_size, cursor)
+    return schemas.AlertPage(total=total, items=items, next_cursor=next_cursor, has_more=has_more)
 
 
 @api.post("/alerts", response_model=schemas.AlertOut)
@@ -494,11 +517,11 @@ def update_alert(alert_id: int, payload: schemas.AlertUpdate, db: Session = Depe
 def page_check_logs(
     page: int = 1,
     page_size: int = 50,
+    cursor: int | None = None,
     url_source_id: int | None = None,
     result: str | None = None,
     db: Session = Depends(get_db),
 ):
-    page = max(page, 1)
     page_size = min(max(page_size, 1), 200)
     statement = select(models.CheckLog)
     count_statement = select(func.count(models.CheckLog.id))
@@ -509,8 +532,8 @@ def page_check_logs(
         statement = statement.where(models.CheckLog.result == result)
         count_statement = count_statement.where(models.CheckLog.result == result)
     total = db.scalar(count_statement) or 0
-    items = list(db.scalars(statement.order_by(desc(models.CheckLog.id)).offset((page - 1) * page_size).limit(page_size)))
-    return schemas.CheckLogPage(total=total, items=items)
+    items, next_cursor, has_more = cursor_window(db, statement, models.CheckLog.id, page_size, cursor)
+    return schemas.CheckLogPage(total=total, items=items, next_cursor=next_cursor, has_more=has_more)
 
 
 @api.get("/categories", response_model=list[schemas.CategoryOut])
@@ -615,6 +638,7 @@ def page_trusted_source_categories(
     source_id: int,
     page: int = 1,
     page_size: int = 50,
+    cursor: int | None = None,
     q: str | None = None,
     sync_status: str | None = None,
     db: Session = Depends(get_db),
@@ -622,7 +646,6 @@ def page_trusted_source_categories(
     source = db.get(models.TrustedSource, source_id)
     if source is None:
         raise HTTPException(status_code=404, detail="可信源不存在")
-    page = max(page, 1)
     page_size = min(max(page_size, 1), 200)
     statement = select(models.SourceCategory).where(models.SourceCategory.source_id == source_id)
     count_statement = select(func.count(models.SourceCategory.id)).where(models.SourceCategory.source_id == source_id)
@@ -642,14 +665,8 @@ def page_trusted_source_categories(
         statement = statement.where(item)
         count_statement = count_statement.where(item)
     total = db.scalar(count_statement) or 0
-    items = list(
-        db.scalars(
-            statement.order_by(models.SourceCategory.category_path, models.SourceCategory.source_category_id)
-            .offset((page - 1) * page_size)
-            .limit(page_size)
-        )
-    )
-    return schemas.SourceCategoryPage(total=total, items=items)
+    items, next_cursor, has_more = cursor_window(db, statement, models.SourceCategory.id, page_size, cursor)
+    return schemas.SourceCategoryPage(total=total, items=items, next_cursor=next_cursor, has_more=has_more)
 
 
 @api.post("/trusted-sources/{source_id}/discover-categories", response_model=schemas.CategoryDiscoveryResult)
@@ -666,13 +683,13 @@ def discover_trusted_source_categories(source_id: int, db: Session = Depends(get
 def page_standard_resources(
     page: int = 1,
     page_size: int = 50,
+    cursor: int | None = None,
     source_id: int | None = None,
     q: str | None = None,
     source_status: str | None = None,
     resource_type: str | None = None,
     db: Session = Depends(get_db),
 ):
-    page = max(page, 1)
     page_size = min(max(page_size, 1), 200)
     statement = select(models.StandardResource)
     count_statement = select(func.count(models.StandardResource.id))
@@ -698,14 +715,8 @@ def page_standard_resources(
         statement = statement.where(item)
         count_statement = count_statement.where(item)
     total = db.scalar(count_statement) or 0
-    items = list(
-        db.scalars(
-            statement.order_by(desc(models.StandardResource.last_synced_at), desc(models.StandardResource.id))
-            .offset((page - 1) * page_size)
-            .limit(page_size)
-        )
-    )
-    return schemas.StandardResourcePage(total=total, items=items)
+    items, next_cursor, has_more = cursor_window(db, statement, models.StandardResource.id, page_size, cursor)
+    return schemas.StandardResourcePage(total=total, items=items, next_cursor=next_cursor, has_more=has_more)
 
 
 @api.get("/standard-file-matches", response_model=list[schemas.StandardFileMatchOut])
@@ -737,31 +748,36 @@ def update_standard_relation(relation_id: int, payload: schemas.StandardRelation
 
 
 @api.post("/standard-file-matches/run", response_model=schemas.MatchRunResult)
-def run_standard_file_match(db: Session = Depends(get_db)):
-    resources = list(
-        db.scalars(
-            select(models.StandardResource).where(
-                or_(
-                    models.StandardResource.normalized_standard_no.is_not(None),
-                    models.StandardResource.standard_no.is_not(None),
-                )
-            )
-        )
-    )
-    by_no: dict[str, list[models.StandardResource]] = {}
-    for resource in resources:
-        key = resource.normalized_standard_no or normalize_standard_no(resource.standard_no).normalized
-        if key:
-            by_no.setdefault(key.strip(), []).append(resource)
-
+def run_standard_file_match(cursor: int | None = None, batch_size: int = 500, db: Session = Depends(get_db)):
+    batch_size = min(max(batch_size, 1), 5000)
     matched = 0
     skipped = 0
-    documents = list(db.scalars(select(models.Document).where(models.Document.standard_no.is_not(None))))
+    processed = 0
+    document_statement = select(models.Document).where(models.Document.standard_no.is_not(None))
+    if cursor:
+        document_statement = document_statement.where(models.Document.id > cursor)
+    documents = list(db.scalars(document_statement.order_by(models.Document.id).limit(batch_size + 1)))
+    has_more = len(documents) > batch_size
+    documents = documents[:batch_size]
+    next_cursor = documents[-1].id if has_more and documents else None
     for document in documents:
+        processed += 1
         if document.standard_no and not document.normalized_standard_no:
             apply_standard_number_fields(document, document.standard_no)
         standard_no = (document.normalized_standard_no or normalize_standard_no(document.standard_no).normalized or "").strip()
-        candidates = by_no.get(standard_no, [])
+        candidates = list(
+            db.scalars(
+                select(models.StandardResource)
+                .where(
+                    or_(
+                        models.StandardResource.normalized_standard_no == standard_no,
+                        models.StandardResource.standard_no == document.standard_no,
+                    )
+                )
+                .order_by(models.StandardResource.id)
+                .limit(20)
+            )
+        )
         if not candidates:
             skipped += 1
             continue
@@ -793,7 +809,7 @@ def run_standard_file_match(db: Session = Depends(get_db)):
         calibrate_resource_status(db, best)
         matched += 1
     db.commit()
-    return schemas.MatchRunResult(matched=matched, skipped=skipped)
+    return schemas.MatchRunResult(matched=matched, skipped=skipped, processed=processed, next_cursor=next_cursor, has_more=has_more)
 
 
 @api.get("/standard-resources/{resource_id}/chain", response_model=schemas.ResourceChainOut)

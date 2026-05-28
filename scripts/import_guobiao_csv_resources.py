@@ -14,8 +14,7 @@ sys.path.insert(0, str(BACKEND))
 os.chdir(BACKEND)
 
 from app import models  # noqa: E402
-from app.database import Base, SessionLocal, engine  # noqa: E402
-from app.migrations import run_lightweight_migrations  # noqa: E402
+from app.database import SessionLocal  # noqa: E402
 from app.settings_store import ensure_default_trusted_sources  # noqa: E402
 from app.standard_number import normalize_standard_no  # noqa: E402
 from app.status_calibration import attach_change_logs_to_documents, calibrate_resource_status  # noqa: E402
@@ -94,9 +93,6 @@ def upsert_resource(db, source, row, keys) -> tuple[bool, models.StandardResourc
 
 
 def import_csv(path: Path, encoding: str = "gb18030", batch_size: int = 1000) -> dict[str, int]:
-    Base.metadata.create_all(bind=engine)
-    run_lightweight_migrations()
-
     stats = {
         "rows": 0,
         "with_url": 0,

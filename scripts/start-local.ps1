@@ -24,6 +24,8 @@ if (-not (Test-Path $apiPython)) {
   throw "Backend virtualenv missing. Run setup first."
 }
 
+& $apiPython -m alembic upgrade head
+
 $api = Start-Process -FilePath $apiPython `
   -ArgumentList @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000") `
   -WorkingDirectory $backend `

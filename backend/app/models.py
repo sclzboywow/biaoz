@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from enum import Enum
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -356,6 +356,7 @@ class StandardRelation(Base):
 
 class StandardFileMatch(Base):
     __tablename__ = "standard_file_matches"
+    __table_args__ = (UniqueConstraint("standard_resource_id", "document_id", name="uq_standard_file_matches_resource_document"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     standard_resource_id: Mapped[int] = mapped_column(ForeignKey("standard_resources.id"), nullable=False)

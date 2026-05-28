@@ -13,7 +13,7 @@ BACKEND = ROOT / "backend"
 sys.path.insert(0, str(BACKEND))
 os.chdir(BACKEND)
 
-from app.database import Base, engine, SessionLocal  # noqa: E402
+from app.database import SessionLocal  # noqa: E402
 from app.models import SourceStatus, UrlSource  # noqa: E402
 
 
@@ -22,8 +22,6 @@ def clean_text(value: str | None) -> str:
 
 
 def import_csv(path: Path, encoding: str = "gb18030", batch_size: int = 1000) -> dict[str, int]:
-    Base.metadata.create_all(bind=engine)
-
     seen_in_file: set[str] = set()
     stats = {
         "rows": 0,

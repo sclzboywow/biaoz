@@ -20,7 +20,7 @@ if (-not (Test-Path $script)) {
 
 $action = New-ScheduledTaskAction `
   -Execute $python `
-  -Argument "`"$script`" --retention-days $RetentionDays" `
+  -Argument "`"$script`" --success-days $RetentionDays" `
   -WorkingDirectory $root
 
 $trigger = New-ScheduledTaskTrigger -Monthly -DaysOfMonth 1 -At $At

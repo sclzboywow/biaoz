@@ -13,7 +13,7 @@ BACKEND = ROOT / "backend"
 sys.path.insert(0, str(BACKEND))
 os.chdir(BACKEND)
 
-from sqlalchemy import delete, func  # noqa: E402
+from sqlalchemy import delete  # noqa: E402
 
 from app import models  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
@@ -49,37 +49,36 @@ def main() -> None:
     handled_alert_cutoff = now - timedelta(days=args.handled_alert_days)
 
     with SessionLocal() as db:
-        success_logs = list(
-            db.query(models.CheckLog.result, models.CheckLog.created_at, func.count(models.CheckLog.id))
+        success_rows = list(
+            db.query(models.CheckLog.result, models.CheckLog.created_at)
             .filter(
                 models.CheckLog.created_at < success_cutoff,
                 models.CheckLog.result.in_(SUCCESS_RESULTS),
                 models.CheckLog.error_message.is_(None),
             )
-            .group_by(models.CheckLog.result, func.strftime("%Y-%m", models.CheckLog.created_at))
         )
+        success_logs = Counter((month_key(created_at), result) for result, created_at in success_rows)
         summary = {
             "generated_at": now.isoformat(),
             "success_cutoff": success_cutoff.isoformat(),
             "handled_alert_cutoff": handled_alert_cutoff.isoformat(),
             "check_logs": [
-                {"month": month_key(created_at), "result": result, "count": count}
-                for result, created_at, count in success_logs
+                {"month": month, "result": result, "count": count}
+                for (month, result), count in sorted(success_logs.items())
             ],
         }
 
-        handled_alerts = (
-            db.query(models.Alert.alert_type, models.Alert.created_at, func.count(models.Alert.id))
+        handled_rows = list(
+            db.query(models.Alert.alert_type, models.Alert.created_at)
             .filter(
                 models.Alert.status != models.AlertStatus.pending.value,
                 models.Alert.created_at < handled_alert_cutoff,
             )
-            .group_by(models.Alert.alert_type, func.strftime("%Y-%m", models.Alert.created_at))
-            .all()
         )
+        handled_alerts = Counter((month_key(created_at), alert_type) for alert_type, created_at in handled_rows)
         summary["handled_alerts"] = [
-            {"month": month_key(created_at), "alert_type": alert_type, "count": count}
-            for alert_type, created_at, count in handled_alerts
+            {"month": month, "alert_type": alert_type, "count": count}
+            for (month, alert_type), count in sorted(handled_alerts.items())
         ]
 
         totals = Counter()
