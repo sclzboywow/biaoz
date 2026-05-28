@@ -112,20 +112,35 @@ def main() -> None:
             break
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            results = list(executor.map(lambda item: (item.id, fetch_url(item, TIMEOUT_SECONDS)), sources))
+            futures = {executor.submit(fetch_url, item, TIMEOUT_SECONDS): item for item in sources}
+            for future in concurrent.futures.as_completed(futures):
+                item = futures[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    result = DownloadFailure(None, f"访问失败：{exc}")
 
-        for source_id, result in results:
-            attempts += 1
-            try:
-                if persist_result(source_id, result, storage.root):
-                    success += 1
-                elif isinstance(result, DownloadFailure):
+                source_id = item.id
+                attempts += 1
+                try:
+                    if persist_result(source_id, result, storage.root):
+                        success += 1
+                    elif isinstance(result, DownloadFailure):
+                        failed += 1
+                    else:
+                        skipped += 1
+                except Exception as exc:
                     failed += 1
-                else:
-                    skipped += 1
-            except Exception as exc:
-                failed += 1
-                print(f"persist_failed source_id={source_id} error={exc}", flush=True)
+                    print(f"persist_failed source_id={source_id} error={exc}", flush=True)
+
+                if attempts % 5 == 0:
+                    files = with_db_retry(count_versions, "count_versions")
+                    elapsed = int(time.time() - started)
+                    print(
+                        f"partial attempts={attempts} success={success} failed={failed} skipped={skipped} "
+                        f"files={files} versions={files} elapsed={elapsed}s",
+                        flush=True,
+                    )
 
         files = with_db_retry(count_versions, "count_versions")
         elapsed = int(time.time() - started)

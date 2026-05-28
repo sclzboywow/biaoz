@@ -237,6 +237,13 @@ SQLITE_TABLES = [
     """,
 ]
 
+SQLITE_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS ix_document_versions_url_source_id ON document_versions (url_source_id)",
+    "CREATE INDEX IF NOT EXISTS ix_document_versions_url_source_hash ON document_versions (url_source_id, file_hash)",
+    "CREATE INDEX IF NOT EXISTS ix_document_versions_document_id ON document_versions (document_id)",
+    "CREATE INDEX IF NOT EXISTS ix_url_sources_status_id ON url_sources (status, id)",
+]
+
 
 def run_lightweight_migrations() -> None:
     if engine.dialect.name != "sqlite":
@@ -253,3 +260,5 @@ def run_lightweight_migrations() -> None:
             for column_name, ddl in columns.items():
                 if column_name not in existing:
                     connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl}"))
+        for ddl in SQLITE_INDEXES:
+            connection.execute(text(ddl))
