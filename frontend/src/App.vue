@@ -306,7 +306,7 @@
           <el-form-item label="状态"><el-select v-model="resourceQuery.source_status" clearable style="width: 120px"><el-option label="现行" value="现行" /><el-option label="废止" value="废止" /></el-select></el-form-item>
           <el-form-item><el-button :icon="Search" @click="loadTrustedResources">查询</el-button></el-form-item>
         </el-form>
-        <el-table :data="trustedResources" :height="pagedTableHeight" @row-click="openResourceChain">
+        <el-table :data="trustedResources" :height="trustedResourceTableHeight" @row-click="openResourceChain">
           <el-table-column prop="standard_no" label="编号" width="160" />
           <el-table-column prop="standard_name" label="名称" min-width="320" show-overflow-tooltip />
           <el-table-column prop="resource_type" label="资源类型" width="140" />
@@ -319,7 +319,7 @@
         </el-table>
         <el-pagination layout="total, sizes, prev, pager, next" :total="resourceTotal" v-model:current-page="resourceQuery.page" v-model:page-size="resourceQuery.page_size" :page-sizes="[20, 50, 100, 200]" @change="loadTrustedResources" />
         <h3 class="section-title">分类同步队列</h3>
-        <el-table :data="sourceCategories.slice(0, 20)" height="260">
+        <el-table :data="sourceCategories.slice(0, 20)" :height="sourceQueueTableHeight">
           <el-table-column prop="source_category_id" label="sublibID" width="100" />
           <el-table-column prop="category_path" label="分类路径" min-width="360" show-overflow-tooltip />
           <el-table-column prop="sync_status" label="同步状态" width="110" />
@@ -645,6 +645,8 @@ const selectedTrustedSourceId = ref<number | undefined>()
 const selectedSourceCategoryId = ref<string | undefined>()
 const dashboardTableHeight = 'calc(100vh - 210px)'
 const pagedTableHeight = 'calc(100vh - 260px)'
+const trustedResourceTableHeight = 'calc(100vh - 540px)'
+const sourceQueueTableHeight = '220px'
 const collectionTableHeight = 'calc(100vh - 230px)'
 const plainTableHeight = 'calc(100vh - 170px)'
 
