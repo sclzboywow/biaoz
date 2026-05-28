@@ -1,0 +1,488 @@
+from __future__ import annotations
+
+import hashlib
+import html as ihtml
+import json
+import re
+from dataclasses import dataclass
+from datetime import UTC, date, datetime
+from typing import Any
+
+import httpx
+from sqlalchemy.orm import Session
+
+from app import models
+from app.status_calibration import attach_change_logs_to_documents, calibrate_resource_status
+from app.trusted_source_adapters import TrustedSourceAdapter, TrustedSourceSyncOptions, TrustedSourceSyncStats, registry
+
+BASE_URL = "https://ebook.chinabuilding.com.cn"
+
+MONITORED_CHANGE_FIELDS = {
+    "standard_no",
+    "standard_name",
+    "source_status",
+    "publish_date",
+    "effective_date",
+    "abolish_date",
+    "detail_hash",
+    "change_info",
+}
+
+
+@dataclass(frozen=True)
+class SublibConfig:
+    sublib_id: int
+    category_name: str
+    category_path: str
+    total_pages_hint: int
+
+
+SUBLIBS = [
+    SublibConfig(2118, "国标图集", "标准图集 / 国标图集", 82),
+    SublibConfig(2246, "国家标准", "标准规范 / 工程建设标准规范 / 工程建设国家标准", 349),
+    SublibConfig(2398, "行业标准", "标准规范 / 工程建设标准规范 / 工程建设行业标准", 1867),
+    SublibConfig(2441, "地方标准", "标准规范 / 工程建设标准规范 / 工程建设地方标准", 28),
+    SublibConfig(2481, "政策法规与技术文件", "政策法规 / 技术文件", 82),
+]
+
+
+def _fallback_pages_hint(category: models.SourceCategory | None) -> int:
+    if category and category.resource_count:
+        return max(1, (category.resource_count + 19) // 20)
+    return 1
+
+
+def _sublibs_from_categories(
+    db: Session,
+    source: models.TrustedSource,
+    sublib_id: int | None,
+    only_pending: bool = False,
+    limit: int | None = None,
+) -> list[SublibConfig]:
+    query = db.query(models.SourceCategory).filter(models.SourceCategory.source_id == source.id)
+    if sublib_id is not None:
+        query = query.filter(models.SourceCategory.source_category_id == str(sublib_id))
+    if only_pending:
+        query = query.filter(
+            (models.SourceCategory.sync_status.is_(None))
+            | (models.SourceCategory.sync_status.in_(["待同步", "同步失败"]))
+        )
+    query = query.order_by(models.SourceCategory.source_category_id)
+    if limit:
+        query = query.limit(limit)
+    categories = list(query)
+    return [
+        SublibConfig(
+            int(category.source_category_id),
+            category.category_name,
+            category.category_path or category.category_name,
+            _fallback_pages_hint(category),
+        )
+        for category in categories
+        if category.source_category_id and category.source_category_id.isdigit()
+    ]
+
+
+def _category_for_sublib(db: Session, source: models.TrustedSource, sublib_id: int) -> models.SourceCategory | None:
+    return (
+        db.query(models.SourceCategory)
+        .filter(
+            models.SourceCategory.source_id == source.id,
+            models.SourceCategory.source_category_id == str(sublib_id),
+        )
+        .first()
+    )
+
+
+def _book_ids_hash(items: list[dict[str, str]]) -> str:
+    value = ",".join(sorted(item["book_id"] for item in items if item.get("book_id")))
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _client(timeout_seconds: int = 20) -> httpx.Client:
+    return httpx.Client(
+        follow_redirects=True,
+        timeout=timeout_seconds,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/123 Safari/537.36",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        },
+    )
+
+
+def _parse_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    match = re.search(r"(\d{4})[-/.年](\d{1,2})(?:[-/.月](\d{1,2}))?", value)
+    if not match:
+        return None
+    year = int(match.group(1))
+    month = int(match.group(2))
+    day = int(match.group(3) or 1)
+    return date(year, month, day)
+
+
+def _strip_html(value: str) -> str:
+    return ihtml.unescape(re.sub(r"<[^>]+>", "", value)).strip()
+
+
+def parse_title(full_title: str) -> tuple[str | None, str]:
+    match = re.match(r"^\s*([^:：]+)\s*[:：]\s*(.+)$", full_title.strip())
+    if not match:
+        return None, full_title.strip()
+    return match.group(1).strip(), match.group(2).strip()
+
+
+def parse_list_items(html: str) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    pattern = re.compile(
+        r'<div class="img-search-list[\s\S]*?<h4 class="search-tit[\s\S]*?'
+        r'<a[^>]+href="([^"]*bookID=(\d+)[^"]*)"[^>]*>([\s\S]*?)</a>[\s\S]*?'
+        r'<span class="(active|abolish)">([\s\S]*?)</span>',
+        re.IGNORECASE,
+    )
+    for match in pattern.finditer(html):
+        href = ihtml.unescape(match.group(1))
+        book_id = match.group(2)
+        full_title = _strip_html(match.group(3))
+        status_text = _strip_html(match.group(5))
+        standard_no, title = parse_title(full_title)
+        detail_url = href if href.startswith("http") else f"{BASE_URL}{href}"
+        items.append(
+            {
+                "book_id": book_id,
+                "standard_no": standard_no or "",
+                "title": title,
+                "status": status_text,
+                "detail_url": detail_url,
+            }
+        )
+    return items
+
+
+def _pick_date(label: str, html: str) -> date | None:
+    match = re.search(label + r"[^0-9]*(\d{4}[-/.年]\d{1,2}(?:[-/.月]\d{1,2})?)", html)
+    return _parse_date(match.group(1)) if match else None
+
+
+def _extract_label_value(labels: list[str], html: str, maxlen: int = 300) -> str | None:
+    for label in labels:
+        patterns = [
+            re.compile(
+                label + r"\s*[:：]?\s*(?:</?[a-zA-Z0-9]+[^>]*>)*\s*([^<\r\n]{1," + str(maxlen) + r"})",
+                re.IGNORECASE,
+            ),
+            re.compile(label + r"[\s\S]{0,80}?<[^>]*>\s*([^<]{1," + str(maxlen) + r"})\s*</", re.IGNORECASE),
+        ]
+        for pattern in patterns:
+            match = pattern.search(html)
+            if match:
+                value = ihtml.unescape(match.group(1)).strip()
+                if value and value not in {"：", ":"}:
+                    return value
+    return None
+
+
+def _extract_section(html: str, labels: list[str], max_chars: int = 5000) -> str | None:
+    for label in labels:
+        match = re.search(label + r"[\s\S]{0,120}?(<div[\s\S]{0," + str(max_chars) + r"}?</div>)", html)
+        if match:
+            text = _strip_html(match.group(1))
+            if text:
+                return text[:max_chars]
+    return None
+
+
+def fetch_detail(client: httpx.Client, book_id: str) -> dict[str, Any]:
+    detail_url = f"{BASE_URL}/zbooklib/book/detail/show?SiteID=1&bookID={book_id}"
+    response = client.get(detail_url)
+    response.raise_for_status()
+    html = response.text
+    detail_hash = hashlib.sha256(html.encode("utf-8", errors="ignore")).hexdigest()
+
+    cover_match = re.search(r"var\s+sharePic\s*=\s*'([^']+)'", html)
+    pdf_trial_url = f"{BASE_URL}/zbooklib/bookpdf/probation?SiteID=1&bookID={book_id}"
+
+    return {
+        "detail_url": detail_url,
+        "detail_hash": detail_hash,
+        "cover": cover_match.group(1) if cover_match else None,
+        "publish_date": _pick_date("发布", html) or _pick_date("出版", html),
+        "effective_date": _pick_date("实施", html) or _pick_date("生效", html),
+        "abolish_date": _pick_date("废止", html),
+        "storage_date": _pick_date("入库", html),
+        "chief_editor_unit": _extract_label_value(["主编单位", "起草单位", "编制单位", "参编单位"], html, 500),
+        "resource_type": _extract_label_value(["资源类型", "标准类型", "图书类型"], html, 120),
+        "summary": _extract_section(html, ["简介", "内容简介"]),
+        "catalog_text": _extract_section(html, ["目录"]),
+        "mandatory_provisions": _extract_section(html, ["强制性条文", "强条"]),
+        "expert_interpretation": _extract_section(html, ["专家解读"]),
+        "product_info": _extract_section(html, ["产品信息"]),
+        "change_info": _extract_section(html, ["变更信息", "变更"]),
+        "related_books": _extract_section(html, ["相关阅读", "相关资源"]),
+        "pdf_trial_url": pdf_trial_url,
+    }
+
+
+def _record_change(
+    db: Session,
+    resource: models.StandardResource,
+    field_name: str,
+    old_value: Any,
+    new_value: Any,
+) -> None:
+    if field_name not in MONITORED_CHANGE_FIELDS:
+        return
+    old_text = "" if old_value is None else str(old_value)
+    new_text = "" if new_value is None else str(new_value)
+    if old_text == new_text:
+        return
+    existing = (
+        db.query(models.StandardChangeLog)
+        .filter(
+            models.StandardChangeLog.standard_resource_id == resource.id,
+            models.StandardChangeLog.field_name == field_name,
+            models.StandardChangeLog.old_value == old_text,
+            models.StandardChangeLog.new_value == new_text,
+        )
+        .first()
+    )
+    if existing:
+        return
+    db.add(
+        models.StandardChangeLog(
+            standard_resource_id=resource.id,
+            field_name=field_name,
+            old_value=old_text,
+            new_value=new_text,
+            change_type="字段变化",
+            source_url=resource.detail_url,
+        )
+    )
+
+
+def _upsert_resource(
+    db: Session,
+    source: models.TrustedSource,
+    sublib: SublibConfig,
+    item: dict[str, str],
+    detail: dict[str, Any] | None,
+) -> tuple[models.StandardResource, bool]:
+    resource = (
+        db.query(models.StandardResource)
+        .filter(
+            models.StandardResource.source_id == source.id,
+            models.StandardResource.source_book_id == item["book_id"],
+        )
+        .first()
+    )
+    created = resource is None
+    if resource is None:
+        resource = models.StandardResource(
+            source_id=source.id,
+            source_book_id=item["book_id"],
+            source_name=source.source_name,
+            standard_name=item["title"],
+        )
+        db.add(resource)
+        db.flush()
+
+    updates = {
+        "standard_no": item.get("standard_no") or resource.standard_no,
+        "standard_name": item["title"],
+        "source_status": item.get("status"),
+        "system_status": "来源确认废止" if item.get("status") == "废止" else "来源确认现行",
+        "source_category_path": sublib.category_path,
+        "detail_url": item.get("detail_url"),
+        "source_confidence": source.trust_score,
+        "last_synced_at": datetime.now(UTC),
+        "sync_status": "已同步",
+    }
+    if detail:
+        updates.update(
+            {
+                "resource_type": detail.get("resource_type") or sublib.category_name,
+                "publish_date": detail.get("publish_date"),
+                "effective_date": detail.get("effective_date"),
+                "abolish_date": detail.get("abolish_date"),
+                "storage_date": detail.get("storage_date"),
+                "chief_editor_unit": detail.get("chief_editor_unit"),
+                "summary": detail.get("summary"),
+                "detail_hash": detail.get("detail_hash"),
+                "pdf_trial_url": detail.get("pdf_trial_url"),
+            }
+        )
+    else:
+        updates["resource_type"] = sublib.category_name
+
+    for field_name, value in updates.items():
+        if not created:
+            _record_change(db, resource, field_name, getattr(resource, field_name), value)
+        setattr(resource, field_name, value)
+
+    if detail:
+        existing_detail = (
+            db.query(models.StandardDetail)
+            .filter(models.StandardDetail.standard_resource_id == resource.id)
+            .first()
+        )
+        if existing_detail is None:
+            existing_detail = models.StandardDetail(standard_resource_id=resource.id)
+            db.add(existing_detail)
+        for field_name in [
+            "catalog_text",
+            "mandatory_provisions",
+            "expert_interpretation",
+            "product_info",
+            "change_info",
+            "related_books",
+        ]:
+            setattr(existing_detail, field_name, detail.get(field_name))
+
+    return resource, created
+
+
+def ensure_source_categories(db: Session, source: models.TrustedSource) -> None:
+    for sublib in SUBLIBS:
+        existing = (
+            db.query(models.SourceCategory)
+            .filter(
+                models.SourceCategory.source_id == source.id,
+                models.SourceCategory.source_category_id == str(sublib.sublib_id),
+            )
+            .first()
+        )
+        if existing:
+            continue
+        db.add(
+            models.SourceCategory(
+                source_id=source.id,
+                source_category_id=str(sublib.sublib_id),
+                category_name=sublib.category_name,
+                category_path=sublib.category_path,
+                source_url=f"{BASE_URL}/zbooklib/sublibBook/resultlist?SiteID=1&viewType=imgView&sublibID={sublib.sublib_id}",
+            )
+        )
+    db.commit()
+
+
+def sync_guobiao_resources(
+    db: Session,
+    max_pages_per_sublib: int = 1,
+    include_detail: bool = True,
+    sublib_id: int | None = None,
+    only_pending_categories: bool = False,
+    category_limit: int | None = None,
+) -> dict[str, int]:
+    source = db.query(models.TrustedSource).filter(models.TrustedSource.source_name == "国标电子书库").first()
+    if source is None:
+        raise ValueError("国标电子书库可信源不存在")
+    ensure_source_categories(db, source)
+
+    selected = _sublibs_from_categories(db, source, sublib_id, only_pending_categories, category_limit)
+    if not selected:
+        selected = [item for item in SUBLIBS if sublib_id is None or item.sublib_id == sublib_id]
+    stats = {
+        "pages": 0,
+        "items": 0,
+        "created": 0,
+        "updated": 0,
+        "skipped_existing_detail": 0,
+        "categories": 0,
+        "errors": 0,
+        "matches": 0,
+        "sync_logs": 0,
+        "alerts": 0,
+        "linked_change_logs": 0,
+    }
+    with _client() as client:
+        for sublib in selected:
+            category = _category_for_sublib(db, source, sublib.sublib_id)
+            if category:
+                category.sync_status = "同步中"
+                category.last_sync_started_at = datetime.now(UTC)
+                category.last_sync_error = None
+                db.commit()
+            stats["categories"] += 1
+            pages = min(max_pages_per_sublib, sublib.total_pages_hint)
+            category_errors = 0
+            for page_index in range(1, pages + 1):
+                list_url = (
+                    f"{BASE_URL}/zbooklib/sublibBook/resultlist?SiteID=1&viewType=imgView"
+                    f"&sublibID={sublib.sublib_id}&sortType=Default&abolish=&indexInfor=&PageIndex={page_index}"
+                )
+                try:
+                    response = client.get(list_url)
+                    response.raise_for_status()
+                    items = parse_list_items(response.text)
+                    if category:
+                        category.last_seen_book_ids_hash = _book_ids_hash(items)
+                        category.last_synced_page = page_index
+                    stats["pages"] += 1
+                except Exception:
+                    stats["errors"] += 1
+                    category_errors += 1
+                    continue
+
+                for item in items:
+                    existing = (
+                        db.query(models.StandardResource)
+                        .filter(
+                            models.StandardResource.source_id == source.id,
+                            models.StandardResource.source_book_id == item["book_id"],
+                        )
+                        .first()
+                    )
+                    detail = None
+                    should_fetch_detail = include_detail and (
+                        existing is None or not existing.detail_hash
+                    )
+                    if should_fetch_detail:
+                        try:
+                            detail = fetch_detail(client, item["book_id"])
+                        except Exception:
+                            stats["errors"] += 1
+                            category_errors += 1
+                    elif include_detail and existing is not None:
+                        stats["skipped_existing_detail"] += 1
+                    resource, created = _upsert_resource(db, source, sublib, item, detail)
+                    calibration = calibrate_resource_status(db, resource)
+                    stats["matches"] += calibration["matches"]
+                    stats["sync_logs"] += calibration["sync_logs"]
+                    stats["alerts"] += calibration["alerts"]
+                    stats["linked_change_logs"] += attach_change_logs_to_documents(db, resource)
+                    stats["items"] += 1
+                    stats["created" if created else "updated"] += 1
+                db.commit()
+            if category:
+                category.last_sync_finished_at = datetime.now(UTC)
+                category.sync_status = "同步失败" if category_errors else "已同步"
+                category.last_sync_error = f"{category_errors} 个采集错误" if category_errors else None
+                db.commit()
+    return stats
+
+
+class GuobiaoEbookAdapter(TrustedSourceAdapter):
+    adapter_key = "guobiao_ebook"
+
+    def sync(self, db: Session, source_id: int, options: TrustedSourceSyncOptions) -> TrustedSourceSyncStats:
+        source = db.get(models.TrustedSource, source_id)
+        if source is None:
+            raise ValueError("可信源不存在")
+        if source.source_name != "国标电子书库":
+            raise ValueError("guobiao_ebook 适配器只能处理国标电子书库")
+        sublib_id = int(options.category_id) if options.category_id else None
+        stats = sync_guobiao_resources(
+            db,
+            max_pages_per_sublib=options.max_pages,
+            include_detail=options.include_detail,
+            sublib_id=sublib_id,
+            only_pending_categories=options.only_pending_categories,
+            category_limit=options.category_limit,
+        )
+        return TrustedSourceSyncStats(**stats)
+
+
+registry.register(GuobiaoEbookAdapter())

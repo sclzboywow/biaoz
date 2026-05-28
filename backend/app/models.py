@@ -1,0 +1,350 @@
+from datetime import date, datetime
+from enum import Enum
+
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.database import Base
+
+
+class TimestampMixin:
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class SourceStatus(str, Enum):
+    normal = "正常"
+    invalid = "失效"
+    login_required = "需登录"
+    error = "异常"
+
+
+class ValidStatus(str, Enum):
+    active = "现行"
+    abolished = "废止"
+    replaced = "替代"
+    pending = "待确认"
+    reference = "参考"
+
+
+class ChangeType(str, Enum):
+    created = "新增"
+    updated = "更新"
+    unchanged = "无变化"
+
+
+class AlertLevel(str, Enum):
+    high = "高"
+    medium = "中"
+    low = "低"
+
+
+class AlertStatus(str, Enum):
+    pending = "未处理"
+    handled = "已处理"
+    ignored = "忽略"
+
+
+class ReviewStatus(str, Enum):
+    pending = "待复核"
+    confirmed = "已确认"
+    abolished = "已废止"
+    reference = "仅参考"
+
+
+class UrlSource(TimestampMixin, Base):
+    __tablename__ = "url_sources"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    url: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    source_name: Mapped[str | None] = mapped_column(String(255))
+    source_unit: Mapped[str | None] = mapped_column(String(255))
+    source_type: Mapped[str | None] = mapped_column(String(80))
+    category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id"))
+    category: Mapped[str | None] = mapped_column(String(120))
+    check_frequency: Mapped[str | None] = mapped_column(String(80), default="daily")
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(30), default=SourceStatus.normal.value)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    remark: Mapped[str | None] = mapped_column(Text)
+
+    versions: Mapped[list["DocumentVersion"]] = relationship(back_populates="url_source")
+    alerts: Mapped[list["Alert"]] = relationship(back_populates="url_source")
+    category_ref: Mapped["Category | None"] = relationship()
+
+
+class Document(TimestampMixin, Base):
+    __tablename__ = "documents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    standard_no: Mapped[str | None] = mapped_column(String(120), index=True)
+    doc_type: Mapped[str | None] = mapped_column(String(50))
+    category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id"))
+    category: Mapped[str | None] = mapped_column(String(120))
+    issuing_authority: Mapped[str | None] = mapped_column(String(255))
+    publish_date: Mapped[date | None] = mapped_column(Date)
+    effective_date: Mapped[date | None] = mapped_column(Date)
+    valid_status: Mapped[str] = mapped_column(String(30), default=ValidStatus.pending.value)
+    review_status: Mapped[str] = mapped_column(String(30), default=ReviewStatus.pending.value)
+    metadata_status: Mapped[str] = mapped_column(String(30), default="系统识别")
+    current_version_id: Mapped[int | None] = mapped_column(Integer)
+    review_remark: Mapped[str | None] = mapped_column(Text)
+    summary: Mapped[str | None] = mapped_column(Text)
+    keywords: Mapped[str | None] = mapped_column(Text)
+
+    versions: Mapped[list["DocumentVersion"]] = relationship(back_populates="document")
+    project_links: Mapped[list["ProjectDocument"]] = relationship(back_populates="document")
+    alerts: Mapped[list["Alert"]] = relationship(back_populates="document")
+    category_ref: Mapped["Category | None"] = relationship()
+
+
+class DocumentVersion(Base):
+    __tablename__ = "document_versions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    document_id: Mapped[int] = mapped_column(ForeignKey("documents.id"), nullable=False)
+    url_source_id: Mapped[int | None] = mapped_column(ForeignKey("url_sources.id"))
+    version_no: Mapped[str | None] = mapped_column(String(80))
+    file_name: Mapped[str] = mapped_column(String(500), nullable=False)
+    file_path: Mapped[str] = mapped_column(Text, nullable=False)
+    file_hash: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    file_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    downloaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    content_hash: Mapped[str | None] = mapped_column(String(128), index=True)
+    change_type: Mapped[str] = mapped_column(String(30), default=ChangeType.created.value)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True)
+    remark: Mapped[str | None] = mapped_column(Text)
+
+    document: Mapped["Document"] = relationship(back_populates="versions")
+    url_source: Mapped["UrlSource | None"] = relationship(back_populates="versions")
+
+
+class Project(TimestampMixin, Base):
+    __tablename__ = "projects"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    project_name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    project_type: Mapped[str | None] = mapped_column(String(120))
+    owner_unit: Mapped[str | None] = mapped_column(String(255))
+    status: Mapped[str | None] = mapped_column(String(80))
+    remark: Mapped[str | None] = mapped_column(Text)
+
+    document_links: Mapped[list["ProjectDocument"]] = relationship(back_populates="project")
+
+
+class ProjectDocument(Base):
+    __tablename__ = "project_documents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    document_id: Mapped[int] = mapped_column(ForeignKey("documents.id"), nullable=False)
+    usage_type: Mapped[str | None] = mapped_column(String(80))
+    importance: Mapped[str | None] = mapped_column(String(50))
+    confirmed_by: Mapped[str | None] = mapped_column(String(120))
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    remark: Mapped[str | None] = mapped_column(Text)
+
+    project: Mapped["Project"] = relationship(back_populates="document_links")
+    document: Mapped["Document"] = relationship(back_populates="project_links")
+
+
+class CheckLog(Base):
+    __tablename__ = "check_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    url_source_id: Mapped[int] = mapped_column(ForeignKey("url_sources.id"), nullable=False)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    check_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status_code: Mapped[int | None] = mapped_column(Integer)
+    result: Mapped[str | None] = mapped_column(String(80))
+    change_detected: Mapped[bool] = mapped_column(Boolean, default=False)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Alert(Base):
+    __tablename__ = "alerts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    document_id: Mapped[int | None] = mapped_column(ForeignKey("documents.id"))
+    url_source_id: Mapped[int | None] = mapped_column(ForeignKey("url_sources.id"))
+    alert_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    alert_level: Mapped[str] = mapped_column(String(30), default=AlertLevel.medium.value)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default=AlertStatus.pending.value)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    handled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    handled_by: Mapped[str | None] = mapped_column(String(120))
+
+    document: Mapped["Document | None"] = relationship(back_populates="alerts")
+    url_source: Mapped["UrlSource | None"] = relationship(back_populates="alerts")
+
+
+class Category(Base):
+    __tablename__ = "categories"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    parent_id: Mapped[int | None] = mapped_column(Integer)
+    category_name: Mapped[str] = mapped_column(String(120), nullable=False, unique=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(30), default="启用")
+
+
+class Tag(Base):
+    __tablename__ = "tags"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    tag_name: Mapped[str] = mapped_column(String(120), nullable=False, unique=True)
+    tag_type: Mapped[str | None] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DocumentTag(Base):
+    __tablename__ = "document_tags"
+
+    document_id: Mapped[int] = mapped_column(ForeignKey("documents.id"), primary_key=True)
+    tag_id: Mapped[int] = mapped_column(ForeignKey("tags.id"), primary_key=True)
+
+
+class SystemSetting(Base):
+    __tablename__ = "system_settings"
+
+    key: Mapped[str] = mapped_column(String(120), primary_key=True)
+    value: Mapped[str | None] = mapped_column(Text)
+    value_type: Mapped[str] = mapped_column(String(30), default="string")
+    label: Mapped[str | None] = mapped_column(String(120))
+    description: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class TrustedSource(TimestampMixin, Base):
+    __tablename__ = "trusted_sources"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    source_name: Mapped[str] = mapped_column(String(120), nullable=False, unique=True)
+    base_url: Mapped[str] = mapped_column(Text, nullable=False)
+    trust_level: Mapped[str] = mapped_column(String(30), default="A")
+    trust_score: Mapped[int] = mapped_column(Integer, default=100)
+    source_type: Mapped[str] = mapped_column(String(120), default="标准规范可信目录源")
+    adapter_key: Mapped[str | None] = mapped_column(String(120))
+    capabilities: Mapped[str | None] = mapped_column(Text)
+    is_status_authority: Mapped[bool] = mapped_column(Boolean, default=True)
+    crawl_mode: Mapped[str | None] = mapped_column(String(120))
+    crawl_frequency: Mapped[str | None] = mapped_column(String(80), default="weekly")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    remark: Mapped[str | None] = mapped_column(Text)
+
+
+class SourceCategory(Base):
+    __tablename__ = "source_categories"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("trusted_sources.id"), nullable=False)
+    source_category_id: Mapped[str | None] = mapped_column(String(120))
+    parent_id: Mapped[int | None] = mapped_column(Integer)
+    category_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    category_path: Mapped[str | None] = mapped_column(Text)
+    resource_count: Mapped[int | None] = mapped_column(Integer)
+    source_url: Mapped[str | None] = mapped_column(Text)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sync_status: Mapped[str | None] = mapped_column(String(80), default="待同步")
+    last_sync_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_sync_finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_sync_error: Mapped[str | None] = mapped_column(Text)
+    last_synced_page: Mapped[int | None] = mapped_column(Integer)
+    last_seen_book_ids_hash: Mapped[str | None] = mapped_column(String(128))
+
+
+class StandardResource(TimestampMixin, Base):
+    __tablename__ = "standard_resources"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("trusted_sources.id"), nullable=False)
+    source_book_id: Mapped[str | None] = mapped_column(String(120), index=True)
+    source_name: Mapped[str | None] = mapped_column(String(120))
+    standard_no: Mapped[str | None] = mapped_column(String(120), index=True)
+    standard_name: Mapped[str] = mapped_column(String(500), nullable=False)
+    resource_type: Mapped[str | None] = mapped_column(String(120), index=True)
+    source_status: Mapped[str | None] = mapped_column(String(80), index=True)
+    system_status: Mapped[str | None] = mapped_column(String(80), index=True)
+    manual_status: Mapped[str | None] = mapped_column(String(80))
+    publish_date: Mapped[date | None] = mapped_column(Date)
+    effective_date: Mapped[date | None] = mapped_column(Date)
+    abolish_date: Mapped[date | None] = mapped_column(Date)
+    storage_date: Mapped[date | None] = mapped_column(Date)
+    chief_editor_unit: Mapped[str | None] = mapped_column(String(500))
+    summary: Mapped[str | None] = mapped_column(Text)
+    keywords: Mapped[str | None] = mapped_column(Text)
+    source_category_path: Mapped[str | None] = mapped_column(Text)
+    detail_url: Mapped[str | None] = mapped_column(Text)
+    pdf_trial_url: Mapped[str | None] = mapped_column(Text)
+    detail_hash: Mapped[str | None] = mapped_column(String(128))
+    source_confidence: Mapped[int] = mapped_column(Integer, default=100)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sync_status: Mapped[str | None] = mapped_column(String(80))
+    matched_document_count: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class StandardDetail(Base):
+    __tablename__ = "standard_details"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    standard_resource_id: Mapped[int] = mapped_column(ForeignKey("standard_resources.id"), nullable=False)
+    catalog_text: Mapped[str | None] = mapped_column(Text)
+    mandatory_provisions: Mapped[str | None] = mapped_column(Text)
+    expert_interpretation: Mapped[str | None] = mapped_column(Text)
+    product_info: Mapped[str | None] = mapped_column(Text)
+    change_info: Mapped[str | None] = mapped_column(Text)
+    related_books: Mapped[str | None] = mapped_column(Text)
+    raw_html_path: Mapped[str | None] = mapped_column(Text)
+    raw_text_path: Mapped[str | None] = mapped_column(Text)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class StandardFileMatch(Base):
+    __tablename__ = "standard_file_matches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    standard_resource_id: Mapped[int] = mapped_column(ForeignKey("standard_resources.id"), nullable=False)
+    document_id: Mapped[int] = mapped_column(ForeignKey("documents.id"), nullable=False)
+    document_version_id: Mapped[int | None] = mapped_column(ForeignKey("document_versions.id"))
+    match_type: Mapped[str | None] = mapped_column(String(80))
+    match_score: Mapped[int | None] = mapped_column(Integer)
+    match_reason: Mapped[str | None] = mapped_column(Text)
+    matched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    status: Mapped[str] = mapped_column(String(80), default="待确认")
+
+
+class StandardChangeLog(Base):
+    __tablename__ = "standard_change_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    standard_resource_id: Mapped[int] = mapped_column(ForeignKey("standard_resources.id"), nullable=False)
+    document_id: Mapped[int | None] = mapped_column(ForeignKey("documents.id"))
+    document_version_id: Mapped[int | None] = mapped_column(ForeignKey("document_versions.id"))
+    field_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    old_value: Mapped[str | None] = mapped_column(Text)
+    new_value: Mapped[str | None] = mapped_column(Text)
+    change_type: Mapped[str | None] = mapped_column(String(80))
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    source_url: Mapped[str | None] = mapped_column(Text)
+    handled_status: Mapped[str] = mapped_column(String(80), default="未处理")
+    evidence_summary: Mapped[str | None] = mapped_column(Text)
+
+
+class SourceStatusSyncLog(Base):
+    __tablename__ = "source_status_sync_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    standard_resource_id: Mapped[int] = mapped_column(ForeignKey("standard_resources.id"), nullable=False)
+    document_id: Mapped[int | None] = mapped_column(ForeignKey("documents.id"))
+    old_status: Mapped[str | None] = mapped_column(String(80))
+    new_status: Mapped[str | None] = mapped_column(String(80))
+    sync_action: Mapped[str | None] = mapped_column(String(120))
+    sync_reason: Mapped[str | None] = mapped_column(Text)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
