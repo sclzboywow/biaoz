@@ -110,6 +110,11 @@ export type CollectionTask = {
   processed: number
   success: number
   failed: number
+  include_manual?: boolean
+  batch_size?: number
+  last_source_id?: number
+  worker_id?: string
+  heartbeat_at?: string
   message?: string
   started_at?: string
   finished_at?: string

@@ -63,6 +63,13 @@ SQLITE_COLUMNS: dict[str, dict[str, str]] = {
         "last_synced_page": "INTEGER",
         "last_seen_book_ids_hash": "VARCHAR(128)",
     },
+    "collection_tasks": {
+        "include_manual": "BOOLEAN DEFAULT 0",
+        "batch_size": "INTEGER DEFAULT 50",
+        "last_source_id": "INTEGER",
+        "worker_id": "VARCHAR(120)",
+        "heartbeat_at": "DATETIME",
+    },
 }
 
 SQLITE_TABLES = [

@@ -324,6 +324,19 @@ def archive_downloaded_content(
     db.add(version)
     db.flush()
     document.current_version_id = version.id
+    db.add(
+        models.StandardEvidence(
+            document_id=document.id,
+            source_name=source.source_name or source.source_unit or "URL来源",
+            source_level="file",
+            source_url=source.url,
+            raw_status_text=change_type,
+            parsed_status=change_type,
+            page_summary=f"{file_name} size={len(downloaded.content)} sha256={file_hash}",
+            page_html_hash=file_hash,
+            evidence_note=f"文件采集归档：{message}",
+        )
+    )
 
     alert_level = models.AlertLevel.high.value if change_type == models.ChangeType.updated.value else models.AlertLevel.medium.value
     alert = create_alert(db, source, alert_type, message, alert_level, document.id)

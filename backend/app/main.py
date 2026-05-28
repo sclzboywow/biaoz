@@ -183,18 +183,27 @@ def run_url_check_task(task_id: int, include_manual: bool, batch_size: int) -> N
         if task is None:
             return
         task.status = "running"
-        task.started_at = datetime.now(UTC)
+        task.started_at = task.started_at or datetime.now(UTC)
+        task.include_manual = include_manual
+        task.batch_size = batch_size
+        task.worker_id = f"fastapi-background-{task_id}"
+        task.heartbeat_at = datetime.now(UTC)
         timeout_seconds = get_int_setting(db, "download_timeout_seconds", 30)
-        statement = select(models.UrlSource.id).order_by(models.UrlSource.id)
+        count_statement = select(func.count(models.UrlSource.id))
         if not include_manual:
-            statement = statement.where(models.UrlSource.check_frequency != "manual")
-        source_ids = list(db.scalars(statement))
-        task.total = len(source_ids)
+            count_statement = count_statement.where(models.UrlSource.check_frequency != "manual")
+        task.total = db.scalar(count_statement) or 0
         db.commit()
 
         try:
-            for index in range(0, len(source_ids), max(batch_size, 1)):
-                for source_id in source_ids[index : index + max(batch_size, 1)]:
+            while True:
+                statement = select(models.UrlSource.id).where(models.UrlSource.id > (task.last_source_id or 0)).order_by(models.UrlSource.id).limit(max(batch_size, 1))
+                if not include_manual:
+                    statement = statement.where(models.UrlSource.check_frequency != "manual")
+                source_ids = list(db.scalars(statement))
+                if not source_ids:
+                    break
+                for source_id in source_ids:
                     source = db.get(models.UrlSource, source_id)
                     if source is None:
                         continue
@@ -207,6 +216,8 @@ def run_url_check_task(task_id: int, include_manual: bool, batch_size: int) -> N
                         task.success += 1
                     else:
                         task.failed += 1
+                    task.last_source_id = source_id
+                    task.heartbeat_at = datetime.now(UTC)
                     task.updated_at = datetime.now(UTC)
                     db.commit()
             task = db.get(models.CollectionTask, task_id)
@@ -230,11 +241,31 @@ def create_url_check_task(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    task = models.CollectionTask(task_type="url_check", status="pending")
+    task = models.CollectionTask(
+        task_type="url_check",
+        status="pending",
+        include_manual=payload.include_manual,
+        batch_size=min(max(payload.batch_size, 1), 500),
+    )
     db.add(task)
     db.commit()
     db.refresh(task)
     background_tasks.add_task(run_url_check_task, task.id, payload.include_manual, min(max(payload.batch_size, 1), 500))
+    return task
+
+
+@api.post("/collection-tasks/{task_id}/resume", response_model=schemas.CollectionTaskOut)
+def resume_collection_task(task_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    task = db.get(models.CollectionTask, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="采集任务不存在")
+    if task.status == "finished":
+        return task
+    task.status = "pending"
+    task.message = "已请求恢复执行"
+    db.commit()
+    db.refresh(task)
+    background_tasks.add_task(run_url_check_task, task.id, bool(task.include_manual), min(max(task.batch_size or 50, 1), 500))
     return task
 
 
@@ -255,6 +286,9 @@ def page_documents(
     q: str | None = None,
     valid_status: str | None = None,
     review_status: str | None = None,
+    source_status: str | None = None,
+    system_status: str | None = None,
+    manual_status: str | None = None,
     doc_type: str | None = None,
     db: Session = Depends(get_db),
 ):
@@ -278,6 +312,12 @@ def page_documents(
         filters.append(models.Document.valid_status == valid_status)
     if review_status:
         filters.append(models.Document.review_status == review_status)
+    if source_status:
+        filters.append(models.Document.source_status == source_status)
+    if system_status:
+        filters.append(models.Document.system_status == system_status)
+    if manual_status:
+        filters.append(models.Document.manual_status == manual_status)
     if doc_type:
         filters.append(models.Document.doc_type == doc_type)
     for item in filters:
@@ -304,9 +344,39 @@ def update_document(document_id: int, payload: schemas.DocumentUpdate, db: Sessi
     if item is None:
         raise HTTPException(status_code=404, detail="文件不存在")
     data = payload.model_dump(exclude_unset=True)
+    old_manual_status = item.manual_status
     updated = crud.update_item(db, item, data)
     if "standard_no" in data:
         apply_standard_number_fields(updated, updated.standard_no)
+    if "manual_status" in data and data.get("manual_status") != old_manual_status:
+        manual_status = data.get("manual_status")
+        if manual_status == "确认现行":
+            updated.review_status = models.ReviewStatus.confirmed.value
+            updated.valid_status = "现行"
+        elif manual_status == "确认废止":
+            updated.review_status = models.ReviewStatus.abolished.value
+            updated.valid_status = "已废止"
+        elif manual_status == "仅供参考":
+            updated.review_status = models.ReviewStatus.reference.value
+        elif manual_status == "暂不处理":
+            updated.review_status = models.ReviewStatus.pending.value
+        db.add(
+            models.StandardEvidence(
+                document_id=updated.id,
+                source_name="人工复核",
+                source_level="manual",
+                source_url=None,
+                raw_status_text=manual_status,
+                parsed_status=manual_status,
+                page_summary=updated.review_remark,
+                evidence_note=f"人工复核状态由 {old_manual_status or '-'} 调整为 {manual_status or '-'}",
+            )
+        )
+    if "valid_status" in data and "system_status" not in data:
+        updated.system_status = data.get("valid_status")
+    if "review_status" in data and "manual_status" not in data:
+        updated.manual_status = data.get("review_status")
+    if "standard_no" in data or "manual_status" in data or "valid_status" in data or "review_status" in data:
         db.commit()
         db.refresh(updated)
     return updated
@@ -651,6 +721,19 @@ def list_standard_change_logs(limit: int = 100, db: Session = Depends(get_db)):
 @api.get("/source-status-sync-logs", response_model=list[schemas.SourceStatusSyncLogOut])
 def list_source_status_sync_logs(limit: int = 100, db: Session = Depends(get_db)):
     return list(db.scalars(select(models.SourceStatusSyncLog).order_by(desc(models.SourceStatusSyncLog.id)).limit(limit)))
+
+
+@api.patch("/standard-relations/{relation_id}", response_model=schemas.StandardRelationOut)
+def update_standard_relation(relation_id: int, payload: schemas.StandardRelationUpdate, db: Session = Depends(get_db)):
+    relation = db.get(models.StandardRelation, relation_id)
+    if relation is None:
+        raise HTTPException(status_code=404, detail="替代/相关关系不存在")
+    data = payload.model_dump(exclude_unset=True)
+    for field_name, value in data.items():
+        setattr(relation, field_name, value)
+    db.commit()
+    db.refresh(relation)
+    return relation
 
 
 @api.post("/standard-file-matches/run", response_model=schemas.MatchRunResult)

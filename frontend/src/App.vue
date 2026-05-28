@@ -109,9 +109,22 @@
           </el-table-column>
           <el-table-column prop="success" label="成功" width="90" />
           <el-table-column prop="failed" label="失败" width="90" />
+          <el-table-column prop="last_source_id" label="游标" width="100" />
+          <el-table-column prop="heartbeat_at" label="心跳时间" width="180" />
           <el-table-column prop="message" label="说明" min-width="260" show-overflow-tooltip />
           <el-table-column prop="started_at" label="开始时间" width="180" />
           <el-table-column prop="finished_at" label="完成时间" width="180" />
+          <el-table-column label="操作" width="110" fixed="right">
+            <template #default="{ row }">
+              <el-button
+                size="small"
+                :disabled="row.status === 'finished' || row.status === 'running'"
+                @click="resumeCollectionTask(row.id)"
+              >
+                继续
+              </el-button>
+            </template>
+          </el-table-column>
         </el-table>
       </section>
 
@@ -122,21 +135,30 @@
         </div>
         <el-form :inline="true" class="filters">
           <el-form-item label="查询"><el-input v-model="documentQuery.q" clearable placeholder="标题、编号、分类、发布单位" @keyup.enter="loadDocuments" /></el-form-item>
-          <el-form-item label="文件状态">
-            <el-select v-model="documentQuery.valid_status" clearable style="width: 140px">
-              <el-option label="待确认" value="待确认" />
+          <el-form-item label="来源状态">
+            <el-select v-model="documentQuery.source_status" clearable style="width: 140px">
               <el-option label="现行" value="现行" />
-              <el-option label="疑似更新" value="疑似更新" />
-              <el-option label="疑似废止" value="疑似废止" />
-              <el-option label="已废止" value="已废止" />
-              <el-option label="历史版本" value="历史版本" />
+              <el-option label="废止" value="废止" />
+              <el-option label="被替代" value="被替代" />
+              <el-option label="即将实施" value="即将实施" />
+              <el-option label="未知" value="未知" />
             </el-select>
           </el-form-item>
-          <el-form-item label="复核状态">
-            <el-select v-model="documentQuery.review_status" clearable style="width: 140px">
+          <el-form-item label="系统判断">
+            <el-select v-model="documentQuery.system_status" clearable style="width: 150px">
+              <el-option label="来源确认现行" value="来源确认现行" />
+              <el-option label="来源确认废止" value="来源确认废止" />
+              <el-option label="疑似被替代" value="疑似被替代" />
+              <el-option label="多来源冲突" value="多来源冲突" />
               <el-option label="待复核" value="待复核" />
-              <el-option label="已确认" value="已确认" />
-              <el-option label="已废止" value="已废止" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="人工复核">
+            <el-select v-model="documentQuery.manual_status" clearable style="width: 140px">
+              <el-option label="确认现行" value="确认现行" />
+              <el-option label="确认废止" value="确认废止" />
+              <el-option label="仅供参考" value="仅供参考" />
+              <el-option label="暂不处理" value="暂不处理" />
             </el-select>
           </el-form-item>
           <el-form-item><el-button :icon="Search" @click="loadDocuments">查询</el-button></el-form-item>
@@ -146,8 +168,9 @@
           <el-table-column prop="standard_no" label="标准编号" width="150" />
           <el-table-column prop="doc_type" label="类型" width="90" />
           <el-table-column prop="category" label="分类" width="130" />
-          <el-table-column prop="valid_status" label="文件状态" width="120" />
-          <el-table-column prop="review_status" label="复核状态" width="120" />
+          <el-table-column prop="source_status" label="来源状态" width="120" />
+          <el-table-column prop="system_status" label="系统判断" width="140" />
+          <el-table-column prop="manual_status" label="人工复核" width="120" />
           <el-table-column prop="metadata_status" label="元数据" width="120" />
         </el-table>
         <el-pagination layout="total, sizes, prev, pager, next" :total="documentTotal" v-model:current-page="documentQuery.page" v-model:page-size="documentQuery.page_size" :page-sizes="[20, 50, 100, 200]" @change="loadDocuments" />
@@ -179,14 +202,15 @@
         <el-table :data="documents" :height="plainTableHeight">
           <el-table-column prop="title" label="文件标题" min-width="280" show-overflow-tooltip />
           <el-table-column prop="standard_no" label="标准编号" width="150" />
-          <el-table-column prop="valid_status" label="文件状态" width="120" />
-          <el-table-column prop="review_status" label="复核状态" width="120" />
+          <el-table-column prop="source_status" label="来源状态" width="120" />
+          <el-table-column prop="system_status" label="系统判断" width="140" />
+          <el-table-column prop="manual_status" label="人工复核" width="120" />
           <el-table-column label="操作" width="310" fixed="right">
             <template #default="{ row }">
               <div class="row-actions">
-                <el-button size="small" type="success" @click="reviewDocument(row.id, '已确认', '现行')">确认现行</el-button>
-                <el-button size="small" type="warning" @click="reviewDocument(row.id, '待复核', '疑似废止')">疑似废止</el-button>
-                <el-button size="small" type="danger" @click="reviewDocument(row.id, '已废止', '已废止')">确认废止</el-button>
+                <el-button size="small" type="success" @click="reviewDocument(row.id, '确认现行')">确认现行</el-button>
+                <el-button size="small" type="warning" @click="reviewDocument(row.id, '暂不处理')">暂不处理</el-button>
+                <el-button size="small" type="danger" @click="reviewDocument(row.id, '确认废止')">确认废止</el-button>
               </div>
             </template>
           </el-table-column>
@@ -479,6 +503,7 @@
         :evidences="resourceChain.evidences"
         :relations="resourceChain.relations"
         :alerts="resourceChain.alerts"
+        @confirm-relation="confirmRelation"
       />
     </section>
 
@@ -516,6 +541,7 @@
         :evidences="documentChain.evidences"
         :relations="documentChain.relations"
         :alerts="documentChain.alerts"
+        @confirm-relation="confirmRelation"
       />
     </section>
   </el-drawer>
@@ -593,6 +619,12 @@ const ChainTables = defineComponent({
       <el-table-column prop="relation_type" label="关系类型" width="120" />
       <el-table-column prop="relation_text" label="关系原文" min-width="360" show-overflow-tooltip />
       <el-table-column prop="source_url" label="来源 URL" min-width="260" show-overflow-tooltip />
+      <el-table-column prop="is_manual_confirmed" label="人工确认" width="100" />
+      <el-table-column label="操作" width="110">
+        <template #default="{ row }">
+          <el-button size="small" :disabled="row.is_manual_confirmed" @click="$emit('confirm-relation', row.id)">确认关系</el-button>
+        </template>
+      </el-table-column>
     </el-table>
 
     <h3 class="section-title">提醒记录</h3>
@@ -651,7 +683,17 @@ const collectionTableHeight = 'calc(100vh - 230px)'
 const plainTableHeight = 'calc(100vh - 170px)'
 
 const urlQuery = reactive({ page: 1, page_size: 50, q: '', status: '', check_frequency: '' })
-const documentQuery = reactive({ page: 1, page_size: 50, q: '', valid_status: '', review_status: '', doc_type: '' })
+const documentQuery = reactive({
+  page: 1,
+  page_size: 50,
+  q: '',
+  source_status: '',
+  system_status: '',
+  manual_status: '',
+  valid_status: '',
+  review_status: '',
+  doc_type: '',
+})
 const alertQuery = reactive({ page: 1, page_size: 50, q: '', status: '未处理' })
 const resourceQuery = reactive({ page: 1, page_size: 50, q: '', source_status: '', resource_type: '' })
 
@@ -677,7 +719,7 @@ async function loadAlerts() {
 }
 
 async function loadCounts() {
-  const pendingDocs = await api.get<Page<DocumentItem>>('/documents/page', { params: { page: 1, page_size: 1, review_status: '待复核' } })
+  const pendingDocs = await api.get<Page<DocumentItem>>('/documents/page', { params: { page: 1, page_size: 1, system_status: '待复核' } })
   const pendingAlerts = await api.get<Page<Alert>>('/alerts/page', { params: { page: 1, page_size: 1, status: '未处理' } })
   pendingReviewCount.value = pendingDocs.data.total
   pendingAlertCount.value = pendingAlerts.data.total
@@ -743,6 +785,12 @@ async function createUrlCheckTask() {
   }
 }
 
+async function resumeCollectionTask(id: number) {
+  await api.post<CollectionTask>(`/collection-tasks/${id}/resume`)
+  ElMessage.success(`后台任务 #${id} 已继续执行`)
+  await loadCollectionTasks()
+}
+
 function taskPercent(row: CollectionTask) {
   if (!row.total) return row.status === 'finished' ? 100 : 0
   return Math.min(100, Math.round((row.processed / row.total) * 100))
@@ -755,8 +803,8 @@ async function createDocument() {
   await loadDocuments()
 }
 
-async function reviewDocument(id: number, review_status: string, valid_status: string) {
-  await api.patch(`/documents/${id}`, { review_status, valid_status, metadata_status: '人工确认' })
+async function reviewDocument(id: number, manual_status: string) {
+  await api.patch(`/documents/${id}`, { manual_status, metadata_status: '人工确认' })
   ElMessage.success('状态已更新')
   await Promise.all([loadDocuments(), loadCounts()])
 }
@@ -807,9 +855,19 @@ async function loadVersions() {
 }
 
 async function loadPendingReview() {
-  documentQuery.review_status = '待复核'
+  documentQuery.system_status = '待复核'
   documentQuery.page = 1
   await loadDocuments()
+}
+
+async function confirmRelation(id: number) {
+  await api.patch(`/standard-relations/${id}`, { is_manual_confirmed: true })
+  ElMessage.success('替代/相关关系已确认')
+  if (resourceChain.value) {
+    await openResourceChainById(resourceChain.value.resource.id)
+  } else if (documentChain.value) {
+    await openDocumentChainById(documentChain.value.document.id)
+  }
 }
 
 async function loadSettings() {

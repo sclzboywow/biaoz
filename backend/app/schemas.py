@@ -223,6 +223,11 @@ class CollectionTaskOut(OrmModel):
     success: int
     failed: int
     message: str | None = None
+    include_manual: bool | None = None
+    batch_size: int | None = None
+    last_source_id: int | None = None
+    worker_id: str | None = None
+    heartbeat_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
     created_at: datetime
@@ -461,6 +466,12 @@ class StandardRelationOut(OrmModel):
     source_url: str | None = None
     discovered_at: datetime
     is_manual_confirmed: bool
+
+
+class StandardRelationUpdate(BaseModel):
+    is_manual_confirmed: bool | None = None
+    relation_type: str | None = None
+    relation_text: str | None = None
 
 
 class MatchRunResult(BaseModel):
