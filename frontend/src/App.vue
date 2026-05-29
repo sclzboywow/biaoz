@@ -173,9 +173,9 @@
           <el-table-column prop="standard_no" label="标准编号" width="150" />
           <el-table-column prop="doc_type" label="类型" width="90" />
           <el-table-column prop="category" label="分类" width="130" />
-          <el-table-column prop="source_status" label="来源状态" width="120" />
-          <el-table-column prop="system_status" label="系统判断" width="140" />
-          <el-table-column prop="manual_status" label="人工复核" width="120" />
+          <el-table-column prop="source_status" label="来源状态" width="120" :formatter="sourceStatusFormatter" />
+          <el-table-column prop="system_status" label="系统判断" width="140" :formatter="systemStatusFormatter" show-overflow-tooltip />
+          <el-table-column prop="manual_status" label="人工复核" width="120" :formatter="manualStatusFormatter" />
           <el-table-column prop="metadata_status" label="元数据" width="120" />
         </el-table>
         <el-pagination layout="total, sizes, prev, pager, next" :total="documentTotal" v-model:current-page="documentQuery.page" v-model:page-size="documentQuery.page_size" :page-sizes="[20, 50, 100, 200]" @change="loadDocuments" />
@@ -207,9 +207,9 @@
         <el-table :data="reviewDocuments" :height="plainTableHeight">
           <el-table-column prop="title" label="文件标题" min-width="280" show-overflow-tooltip />
           <el-table-column prop="standard_no" label="标准编号" width="150" />
-          <el-table-column prop="source_status" label="来源状态" width="120" />
-          <el-table-column prop="system_status" label="系统判断" width="140" />
-          <el-table-column prop="manual_status" label="人工复核" width="120" />
+          <el-table-column prop="source_status" label="来源状态" width="120" :formatter="sourceStatusFormatter" />
+          <el-table-column prop="system_status" label="系统判断" width="140" :formatter="systemStatusFormatter" show-overflow-tooltip />
+          <el-table-column prop="manual_status" label="人工复核" width="120" :formatter="manualStatusFormatter" />
           <el-table-column label="操作" width="310" fixed="right">
             <template #default="{ row }">
               <div class="row-actions">
@@ -497,9 +497,9 @@
       <el-table :data="resourceChain.documents" height="220">
         <el-table-column prop="standard_no" label="编号" width="150" />
         <el-table-column prop="title" label="文件名称" min-width="320" show-overflow-tooltip />
-        <el-table-column prop="source_status" label="来源状态" width="120" />
-        <el-table-column prop="system_status" label="系统判断" width="140" />
-        <el-table-column prop="manual_status" label="人工复核" width="120" />
+        <el-table-column prop="source_status" label="来源状态" width="120" :formatter="sourceStatusFormatter" />
+        <el-table-column prop="system_status" label="系统判断" width="140" :formatter="systemStatusFormatter" show-overflow-tooltip />
+        <el-table-column prop="manual_status" label="人工复核" width="120" :formatter="manualStatusFormatter" />
         <el-table-column label="操作" width="110">
           <template #default="{ row }"><el-button size="small" @click.stop="openDocumentChainById(row.id)">文件链路</el-button></template>
         </el-table-column>
@@ -535,8 +535,8 @@
       <el-table :data="documentChain.resources" height="220">
         <el-table-column prop="standard_no" label="编号" width="150" />
         <el-table-column prop="standard_name" label="标准名称" min-width="320" show-overflow-tooltip />
-        <el-table-column prop="source_status" label="来源状态" width="120" />
-        <el-table-column prop="system_status" label="系统判断" width="140" />
+        <el-table-column prop="source_status" label="来源状态" width="120" :formatter="sourceStatusFormatter" />
+        <el-table-column prop="system_status" label="系统判断" width="140" :formatter="systemStatusFormatter" show-overflow-tooltip />
         <el-table-column prop="abolish_date" label="废止日期" width="120" :formatter="dateFormatter" show-overflow-tooltip />
         <el-table-column label="操作" width="110">
           <template #default="{ row }"><el-button size="small" @click.stop="openResourceChainById(row.id)">资源链路</el-button></template>
@@ -587,6 +587,26 @@ function dateFormatter(_row: unknown, _column: unknown, value?: string | null) {
   return formatDate(value)
 }
 
+type StatusLike = {
+  source_status?: string | null
+  system_status?: string | null
+  manual_status?: string | null
+  valid_status?: string | null
+  review_status?: string | null
+}
+
+function sourceStatusFormatter(row: StatusLike) {
+  return row.source_status || '-'
+}
+
+function systemStatusFormatter(row: StatusLike) {
+  return row.system_status || row.valid_status || '-'
+}
+
+function manualStatusFormatter(row: StatusLike) {
+  return row.manual_status || row.review_status || '-'
+}
+
 const ChainTables = defineComponent({
   props: {
     versions: { type: Array, required: true },
@@ -597,7 +617,7 @@ const ChainTables = defineComponent({
     relations: { type: Array, required: true },
     alerts: { type: Array, required: true },
   },
-  methods: { dateTimeFormatter },
+  methods: { dateTimeFormatter, sourceStatusFormatter, systemStatusFormatter, manualStatusFormatter },
   template: `
     <h3 class="section-title">来源 URL</h3>
     <el-table :data="urlSources" height="180">

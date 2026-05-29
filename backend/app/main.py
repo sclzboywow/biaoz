@@ -793,21 +793,18 @@ def run_standard_file_match(cursor: int | None = None, batch_size: int = 500, db
             )
         ).first()
         if exists:
-            skipped += 1
+            calibration = calibrate_resource_status(db, best)
+            matched += calibration["matches"]
             continue
-        db.add(
-            models.StandardFileMatch(
-                standard_resource_id=best.id,
-                document_id=document.id,
-                document_version_id=document.current_version_id,
-                match_type="规范化编号一致",
-                match_score=100 if len(candidates) == 1 else score,
-                match_reason=f"本地编号与可信源规范化后均为：{standard_no}",
-                status="自动确认" if len(candidates) == 1 else "待确认",
-            )
-        )
-        calibrate_resource_status(db, best)
-        matched += 1
+
+        # calibrate_resource_status owns match creation, status backfill, evidence,
+        # sync logs, and alerts. Keeping match creation in one place avoids duplicate
+        # pending inserts for the same resource/document pair during large batches.
+        calibration = calibrate_resource_status(db, best)
+        if calibration["matches"]:
+            matched += calibration["matches"]
+        else:
+            skipped += 1
     db.commit()
     return schemas.MatchRunResult(matched=matched, skipped=skipped, processed=processed, next_cursor=next_cursor, has_more=has_more)
 
