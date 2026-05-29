@@ -62,6 +62,14 @@ body {
   color: #4b5563;
 }
 
+.content-tabs {
+  min-height: 0;
+}
+
+.content-tabs .el-tabs__content {
+  min-height: 0;
+}
+
 .el-table .cell {
   white-space: nowrap;
   overflow: hidden;
