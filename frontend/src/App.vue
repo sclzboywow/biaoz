@@ -815,7 +815,7 @@ const trustedResourceActiveTab = ref('resources')
 const dashboardTableHeight = 'calc(100vh - 210px)'
 const pagedTableHeight = 'calc(100vh - 260px)'
 const trustedResourceTableHeight = 'calc(100vh - 330px)'
-const collectionTableHeight = 'calc(100vh - 230px)'
+const collectionTableHeight = 'calc(100vh - 360px)'
 const plainTableHeight = 'calc(100vh - 170px)'
 const pageSizeOptions = [20, 50, 100, 200]
 
