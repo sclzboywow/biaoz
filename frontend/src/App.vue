@@ -87,45 +87,50 @@
             <el-button type="primary" :loading="checkingAll" @click="createUrlCheckTask">创建后台检查任务</el-button>
           </div>
         </div>
-        <el-alert title="已导入的大批量 URL 默认是 manual，不会被后台自动下载。需要采集时可在 URL 来源管理中单条检查，或后续按分类/批次放开频率。" type="info" :closable="false" />
-        <el-table :data="urlSources" :height="collectionTableHeight" style="margin-top: 14px">
-          <el-table-column prop="source_name" label="来源名称" min-width="260" show-overflow-tooltip />
-          <el-table-column prop="status" label="链接状态" width="110" />
-          <el-table-column prop="error_message" label="异常信息" min-width="260" show-overflow-tooltip />
-          <el-table-column prop="last_checked_at" label="最后检查" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
-          <el-table-column label="操作" width="120">
-            <template #default="{ row }"><el-button size="small" @click="checkSource(row.id)">采集</el-button></template>
-          </el-table-column>
-        </el-table>
-        <h3 class="section-title">后台任务进度</h3>
-        <el-table :data="collectionTasks" height="260">
-          <el-table-column prop="id" label="任务ID" width="90" />
-          <el-table-column prop="task_type" label="任务类型" width="120" />
-          <el-table-column prop="status" label="状态" width="110" />
-          <el-table-column label="进度" width="220">
-            <template #default="{ row }">
-              <el-progress :percentage="taskPercent(row)" :text-inside="true" :stroke-width="18" />
-            </template>
-          </el-table-column>
-          <el-table-column prop="success" label="成功" width="90" />
-          <el-table-column prop="failed" label="失败" width="90" />
-          <el-table-column prop="last_source_id" label="游标" width="100" />
-          <el-table-column prop="heartbeat_at" label="心跳时间" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
-          <el-table-column prop="message" label="说明" min-width="260" show-overflow-tooltip />
-          <el-table-column prop="started_at" label="开始时间" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
-          <el-table-column prop="finished_at" label="完成时间" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
-          <el-table-column label="操作" width="110" fixed="right">
-            <template #default="{ row }">
-              <el-button
-                size="small"
-                :disabled="row.status === 'finished' || row.status === 'running'"
-                @click="resumeCollectionTask(row.id)"
-              >
-                继续
-              </el-button>
-            </template>
-          </el-table-column>
-        </el-table>
+        <el-tabs v-model="collectionActiveTab" class="content-tabs">
+          <el-tab-pane label="采集来源" name="sources">
+            <el-alert title="已导入的大批量 URL 默认是 manual，不会被后台自动下载。需要采集时可在 URL 来源管理中单条检查，或后续按分类/批次放开频率。" type="info" :closable="false" />
+            <el-table :data="urlSources" :height="collectionTableHeight" style="margin-top: 14px">
+              <el-table-column prop="source_name" label="来源名称" min-width="260" show-overflow-tooltip />
+              <el-table-column prop="status" label="链接状态" width="110" />
+              <el-table-column prop="error_message" label="异常信息" min-width="260" show-overflow-tooltip />
+              <el-table-column prop="last_checked_at" label="最后检查" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
+              <el-table-column label="操作" width="120">
+                <template #default="{ row }"><el-button size="small" @click="checkSource(row.id)">采集</el-button></template>
+              </el-table-column>
+            </el-table>
+          </el-tab-pane>
+          <el-tab-pane label="后台任务进度" name="tasks">
+            <el-table :data="collectionTasks" :height="collectionTableHeight">
+              <el-table-column prop="id" label="任务ID" width="90" />
+              <el-table-column prop="task_type" label="任务类型" width="120" />
+              <el-table-column prop="status" label="状态" width="110" />
+              <el-table-column label="进度" width="220">
+                <template #default="{ row }">
+                  <el-progress :percentage="taskPercent(row)" :text-inside="true" :stroke-width="18" />
+                </template>
+              </el-table-column>
+              <el-table-column prop="success" label="成功" width="90" />
+              <el-table-column prop="failed" label="失败" width="90" />
+              <el-table-column prop="last_source_id" label="游标" width="100" />
+              <el-table-column prop="heartbeat_at" label="心跳时间" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
+              <el-table-column prop="message" label="说明" min-width="260" show-overflow-tooltip />
+              <el-table-column prop="started_at" label="开始时间" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
+              <el-table-column prop="finished_at" label="完成时间" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
+              <el-table-column label="操作" width="110" fixed="right">
+                <template #default="{ row }">
+                  <el-button
+                    size="small"
+                    :disabled="row.status === 'finished' || row.status === 'running'"
+                    @click="resumeCollectionTask(row.id)"
+                  >
+                    继续
+                  </el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+          </el-tab-pane>
+        </el-tabs>
       </section>
 
       <section v-if="activeView === 'documents'" class="panel">
@@ -199,7 +204,7 @@
           <h2>状态复核</h2>
           <el-button :icon="Search" @click="loadPendingReview">待复核</el-button>
         </div>
-        <el-table :data="documents" :height="plainTableHeight">
+        <el-table :data="reviewDocuments" :height="plainTableHeight">
           <el-table-column prop="title" label="文件标题" min-width="280" show-overflow-tooltip />
           <el-table-column prop="standard_no" label="标准编号" width="150" />
           <el-table-column prop="source_status" label="来源状态" width="120" />
@@ -330,27 +335,32 @@
           <el-form-item label="状态"><el-select v-model="resourceQuery.source_status" clearable style="width: 120px"><el-option label="现行" value="现行" /><el-option label="废止" value="废止" /></el-select></el-form-item>
           <el-form-item><el-button :icon="Search" @click="loadTrustedResources">查询</el-button></el-form-item>
         </el-form>
-        <el-table :data="trustedResources" :height="trustedResourceTableHeight" @row-click="openResourceChain">
-          <el-table-column prop="standard_no" label="编号" width="160" />
-          <el-table-column prop="standard_name" label="名称" min-width="320" show-overflow-tooltip />
-          <el-table-column prop="resource_type" label="资源类型" width="140" />
-          <el-table-column prop="source_status" label="可信源状态" width="120" />
-          <el-table-column prop="matched_document_count" label="匹配文件" width="100" />
-          <el-table-column prop="publish_date" label="发布日期" width="120" :formatter="dateFormatter" show-overflow-tooltip />
-          <el-table-column prop="effective_date" label="实施日期" width="120" :formatter="dateFormatter" show-overflow-tooltip />
-          <el-table-column prop="abolish_date" label="废止日期" width="120" :formatter="dateFormatter" show-overflow-tooltip />
-          <el-table-column prop="source_category_path" label="分类路径" min-width="260" show-overflow-tooltip />
-        </el-table>
-        <el-pagination layout="total, sizes, prev, pager, next" :total="resourceTotal" v-model:current-page="resourceQuery.page" v-model:page-size="resourceQuery.page_size" :page-sizes="[20, 50, 100, 200]" @change="loadTrustedResources" />
-        <h3 class="section-title">分类同步队列</h3>
-        <el-table :data="sourceCategories.slice(0, 20)" :height="sourceQueueTableHeight">
-          <el-table-column prop="source_category_id" label="sublibID" width="100" />
-          <el-table-column prop="category_path" label="分类路径" min-width="360" show-overflow-tooltip />
-          <el-table-column prop="sync_status" label="同步状态" width="110" />
-          <el-table-column prop="last_synced_page" label="页数" width="80" />
-          <el-table-column prop="last_sync_finished_at" label="最后完成" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
-          <el-table-column prop="last_sync_error" label="错误" min-width="180" show-overflow-tooltip />
-        </el-table>
+        <el-tabs v-model="trustedResourceActiveTab" class="content-tabs">
+          <el-tab-pane label="资源列表" name="resources">
+            <el-table :data="trustedResources" :height="trustedResourceTableHeight" @row-click="openResourceChain">
+              <el-table-column prop="standard_no" label="编号" width="160" />
+              <el-table-column prop="standard_name" label="名称" min-width="320" show-overflow-tooltip />
+              <el-table-column prop="resource_type" label="资源类型" width="140" />
+              <el-table-column prop="source_status" label="可信源状态" width="120" />
+              <el-table-column prop="matched_document_count" label="匹配文件" width="100" />
+              <el-table-column prop="publish_date" label="发布日期" width="120" :formatter="dateFormatter" show-overflow-tooltip />
+              <el-table-column prop="effective_date" label="实施日期" width="120" :formatter="dateFormatter" show-overflow-tooltip />
+              <el-table-column prop="abolish_date" label="废止日期" width="120" :formatter="dateFormatter" show-overflow-tooltip />
+              <el-table-column prop="source_category_path" label="分类路径" min-width="260" show-overflow-tooltip />
+            </el-table>
+            <el-pagination layout="total, sizes, prev, pager, next" :total="resourceTotal" v-model:current-page="resourceQuery.page" v-model:page-size="resourceQuery.page_size" :page-sizes="[20, 50, 100, 200]" @change="loadTrustedResources" />
+          </el-tab-pane>
+          <el-tab-pane label="分类同步队列" name="queue">
+            <el-table :data="sourceCategories" :height="trustedResourceTableHeight">
+              <el-table-column prop="source_category_id" label="sublibID" width="100" />
+              <el-table-column prop="category_path" label="分类路径" min-width="360" show-overflow-tooltip />
+              <el-table-column prop="sync_status" label="同步状态" width="110" />
+              <el-table-column prop="last_synced_page" label="页数" width="80" />
+              <el-table-column prop="last_sync_finished_at" label="最后完成" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
+              <el-table-column prop="last_sync_error" label="错误" min-width="180" show-overflow-tooltip />
+            </el-table>
+          </el-tab-pane>
+        </el-tabs>
       </section>
 
       <section v-if="activeView === 'fileMatches'" class="panel">
@@ -666,6 +676,7 @@ const ChainTables = defineComponent({
 const activeView = ref('dashboard')
 const urlSources = ref<UrlSource[]>([])
 const documents = ref<DocumentItem[]>([])
+const reviewDocuments = ref<DocumentItem[]>([])
 const alerts = ref<Alert[]>([])
 const versions = ref<DocumentVersion[]>([])
 const systemSettings = ref<SystemSetting[]>([])
@@ -700,6 +711,8 @@ const syncingPendingCategories = ref(false)
 const selectedDocumentId = ref<number | undefined>()
 const selectedTrustedSourceId = ref<number | undefined>()
 const selectedSourceCategoryId = ref<string | undefined>()
+const collectionActiveTab = ref('sources')
+const trustedResourceActiveTab = ref('resources')
 const dashboardTableHeight = 'calc(100vh - 210px)'
 const pagedTableHeight = 'calc(100vh - 260px)'
 const trustedResourceTableHeight = 'calc(100vh - 540px)'
@@ -756,9 +769,14 @@ async function loadAll() {
 
 function switchView(view: string) {
   activeView.value = view
+  if (view === 'documents') loadDocuments()
+  if (view === 'versions') loadDocuments()
   if (view === 'review') loadPendingReview()
   if (view === 'settings') loadSettings()
-  if (view === 'collection') loadCollectionTasks()
+  if (view === 'collection') {
+    loadUrlSources()
+    loadCollectionTasks()
+  }
   if (view === 'trustedResources') loadTrustedResources()
   if (view === 'fileMatches') loadFileMatches()
   if (view === 'sourceChanges') loadSourceChanges()
@@ -831,7 +849,11 @@ async function createDocument() {
 async function reviewDocument(id: number, manual_status: string) {
   await api.patch(`/documents/${id}`, { manual_status, metadata_status: '人工确认' })
   ElMessage.success('状态已更新')
-  await Promise.all([loadDocuments(), loadCounts()])
+  if (activeView.value === 'review') {
+    await Promise.all([loadPendingReview(), loadCounts()])
+  } else {
+    await Promise.all([loadDocuments(), loadCounts()])
+  }
 }
 
 async function setAlertStatus(id: number, status: string) {
@@ -880,9 +902,10 @@ async function loadVersions() {
 }
 
 async function loadPendingReview() {
-  documentQuery.system_status = '待复核'
-  documentQuery.page = 1
-  await loadDocuments()
+  const res = await api.get<Page<DocumentItem>>('/documents/page', {
+    params: { page: 1, page_size: documentQuery.page_size, system_status: '待复核' },
+  })
+  reviewDocuments.value = res.data.items
 }
 
 async function confirmRelation(id: number) {
