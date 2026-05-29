@@ -42,7 +42,15 @@
               </template>
             </el-table-column>
           </el-table>
-          <el-pagination layout="total, sizes, prev, pager, next" :total="alertTotal" v-model:current-page="alertQuery.page" v-model:page-size="alertQuery.page_size" :page-sizes="[20, 50, 100, 200]" @change="loadAlerts" />
+          <div class="cursor-pager">
+            <span>Total {{ alertTotal }}</span>
+            <el-select v-model="alertQuery.page_size" style="width: 132px" @change="resetAlerts">
+              <el-option v-for="size in pageSizeOptions" :key="size" :label="`${size}/page`" :value="size" />
+            </el-select>
+            <el-button :disabled="alertPager.page <= 1" @click="prevCursorPage(alertPager, loadAlerts)">上一页</el-button>
+            <span>第 {{ alertPager.page }} 页</span>
+            <el-button :disabled="!alertPager.hasMore" @click="nextCursorPage(alertPager, loadAlerts)">下一页</el-button>
+          </div>
         </div>
       </section>
 
@@ -55,14 +63,14 @@
           </div>
         </div>
         <el-form :inline="true" class="filters">
-          <el-form-item label="查询"><el-input v-model="urlQuery.q" clearable placeholder="名称、URL、备注" @keyup.enter="loadUrlSources" /></el-form-item>
+          <el-form-item label="查询"><el-input v-model="urlQuery.q" clearable placeholder="名称、URL、备注" @keyup.enter="resetUrlSources" /></el-form-item>
           <el-form-item label="状态">
             <el-select v-model="urlQuery.status" clearable style="width: 120px"><el-option label="正常" value="正常" /><el-option label="失效" value="失效" /><el-option label="异常" value="异常" /><el-option label="需登录" value="需登录" /></el-select>
           </el-form-item>
           <el-form-item label="频率">
             <el-select v-model="urlQuery.check_frequency" clearable style="width: 130px"><el-option label="manual" value="manual" /><el-option label="daily" value="daily" /><el-option label="weekly" value="weekly" /><el-option label="monthly" value="monthly" /></el-select>
           </el-form-item>
-          <el-form-item><el-button :icon="Search" @click="loadUrlSources">查询</el-button></el-form-item>
+          <el-form-item><el-button :icon="Search" @click="resetUrlSources">查询</el-button></el-form-item>
         </el-form>
         <el-table :data="urlSources" :height="pagedTableHeight">
           <el-table-column prop="source_name" label="来源名称" width="240" show-overflow-tooltip />
@@ -76,7 +84,15 @@
             <template #default="{ row }"><el-button size="small" :loading="checkingSourceId === row.id" @click="checkSource(row.id)">检查</el-button></template>
           </el-table-column>
         </el-table>
-        <el-pagination layout="total, sizes, prev, pager, next" :total="urlTotal" v-model:current-page="urlQuery.page" v-model:page-size="urlQuery.page_size" :page-sizes="[20, 50, 100, 200]" @change="loadUrlSources" />
+        <div class="cursor-pager">
+          <span>Total {{ urlTotal }}</span>
+          <el-select v-model="urlQuery.page_size" style="width: 132px" @change="resetUrlSources">
+            <el-option v-for="size in pageSizeOptions" :key="size" :label="`${size}/page`" :value="size" />
+          </el-select>
+          <el-button :disabled="urlPager.page <= 1" @click="prevCursorPage(urlPager, loadUrlSources)">上一页</el-button>
+          <span>第 {{ urlPager.page }} 页</span>
+          <el-button :disabled="!urlPager.hasMore" @click="nextCursorPage(urlPager, loadUrlSources)">下一页</el-button>
+        </div>
       </section>
 
       <section v-if="activeView === 'collection'" class="panel">
@@ -139,7 +155,7 @@
           <el-button type="primary" :icon="Plus" @click="showDocumentDialog = true">新增</el-button>
         </div>
         <el-form :inline="true" class="filters">
-          <el-form-item label="查询"><el-input v-model="documentQuery.q" clearable placeholder="标题、编号、分类、发布单位" @keyup.enter="loadDocuments" /></el-form-item>
+          <el-form-item label="查询"><el-input v-model="documentQuery.q" clearable placeholder="标题、编号、分类、发布单位" @keyup.enter="resetDocuments" /></el-form-item>
           <el-form-item label="来源状态">
             <el-select v-model="documentQuery.source_status" clearable style="width: 140px">
               <el-option label="现行" value="现行" />
@@ -166,7 +182,7 @@
               <el-option label="暂不处理" value="暂不处理" />
             </el-select>
           </el-form-item>
-          <el-form-item><el-button :icon="Search" @click="loadDocuments">查询</el-button></el-form-item>
+          <el-form-item><el-button :icon="Search" @click="resetDocuments">查询</el-button></el-form-item>
         </el-form>
         <el-table :data="documents" :height="pagedTableHeight" @row-click="openDocumentChain">
           <el-table-column prop="title" label="文件标题" min-width="280" show-overflow-tooltip />
@@ -178,7 +194,15 @@
           <el-table-column prop="manual_status" label="人工复核" width="120" :formatter="manualStatusFormatter" />
           <el-table-column prop="metadata_status" label="元数据" width="120" />
         </el-table>
-        <el-pagination layout="total, sizes, prev, pager, next" :total="documentTotal" v-model:current-page="documentQuery.page" v-model:page-size="documentQuery.page_size" :page-sizes="[20, 50, 100, 200]" @change="loadDocuments" />
+        <div class="cursor-pager">
+          <span>Total {{ documentTotal }}</span>
+          <el-select v-model="documentQuery.page_size" style="width: 132px" @change="resetDocuments">
+            <el-option v-for="size in pageSizeOptions" :key="size" :label="`${size}/page`" :value="size" />
+          </el-select>
+          <el-button :disabled="documentPager.page <= 1" @click="prevCursorPage(documentPager, loadDocuments)">上一页</el-button>
+          <span>第 {{ documentPager.page }} 页</span>
+          <el-button :disabled="!documentPager.hasMore" @click="nextCursorPage(documentPager, loadDocuments)">下一页</el-button>
+        </div>
       </section>
 
       <section v-if="activeView === 'versions'" class="panel">
@@ -228,9 +252,9 @@
           <el-button :icon="Refresh" @click="loadAlerts">刷新</el-button>
         </div>
         <el-form :inline="true" class="filters">
-          <el-form-item label="查询"><el-input v-model="alertQuery.q" clearable placeholder="提醒内容" @keyup.enter="loadAlerts" /></el-form-item>
+          <el-form-item label="查询"><el-input v-model="alertQuery.q" clearable placeholder="提醒内容" @keyup.enter="resetAlerts" /></el-form-item>
           <el-form-item label="状态"><el-select v-model="alertQuery.status" clearable style="width: 130px"><el-option label="未处理" value="未处理" /><el-option label="已处理" value="已处理" /><el-option label="忽略" value="忽略" /></el-select></el-form-item>
-          <el-form-item><el-button :icon="Search" @click="loadAlerts">查询</el-button></el-form-item>
+          <el-form-item><el-button :icon="Search" @click="resetAlerts">查询</el-button></el-form-item>
         </el-form>
         <el-table :data="alerts" :height="pagedTableHeight">
           <el-table-column prop="alert_level" label="等级" width="90" />
@@ -246,7 +270,15 @@
             </template>
           </el-table-column>
         </el-table>
-        <el-pagination layout="total, sizes, prev, pager, next" :total="alertTotal" v-model:current-page="alertQuery.page" v-model:page-size="alertQuery.page_size" :page-sizes="[20, 50, 100, 200]" @change="loadAlerts" />
+        <div class="cursor-pager">
+          <span>Total {{ alertTotal }}</span>
+          <el-select v-model="alertQuery.page_size" style="width: 132px" @change="resetAlerts">
+            <el-option v-for="size in pageSizeOptions" :key="size" :label="`${size}/page`" :value="size" />
+          </el-select>
+          <el-button :disabled="alertPager.page <= 1" @click="prevCursorPage(alertPager, loadAlerts)">上一页</el-button>
+          <span>第 {{ alertPager.page }} 页</span>
+          <el-button :disabled="!alertPager.hasMore" @click="nextCursorPage(alertPager, loadAlerts)">下一页</el-button>
+        </div>
       </section>
 
       <section v-if="activeView === 'settings'" class="panel">
@@ -311,7 +343,7 @@
         <div class="toolbar">
           <h2>可信源资源库</h2>
           <div>
-            <el-select v-model="selectedTrustedSourceId" placeholder="选择可信源" style="width: 220px; margin-right: 8px" @change="loadTrustedResources">
+            <el-select v-model="selectedTrustedSourceId" placeholder="选择可信源" style="width: 220px; margin-right: 8px" @change="resetTrustedResources">
               <el-option v-for="item in trustedSources" :key="item.id" :label="item.source_name" :value="item.id" />
             </el-select>
             <el-button :icon="Refresh" @click="loadTrustedResources">刷新</el-button>
@@ -331,9 +363,9 @@
               />
             </el-select>
           </el-form-item>
-          <el-form-item label="查询"><el-input v-model="resourceQuery.q" clearable placeholder="编号、名称、关键词、分类" @keyup.enter="loadTrustedResources" /></el-form-item>
+          <el-form-item label="查询"><el-input v-model="resourceQuery.q" clearable placeholder="编号、名称、关键词、分类" @keyup.enter="resetTrustedResources" /></el-form-item>
           <el-form-item label="状态"><el-select v-model="resourceQuery.source_status" clearable style="width: 120px"><el-option label="现行" value="现行" /><el-option label="废止" value="废止" /></el-select></el-form-item>
-          <el-form-item><el-button :icon="Search" @click="loadTrustedResources">查询</el-button></el-form-item>
+          <el-form-item><el-button :icon="Search" @click="resetTrustedResources">查询</el-button></el-form-item>
         </el-form>
         <el-tabs v-model="trustedResourceActiveTab" class="content-tabs">
           <el-tab-pane label="资源列表" name="resources">
@@ -348,7 +380,15 @@
               <el-table-column prop="abolish_date" label="废止日期" width="120" :formatter="dateFormatter" show-overflow-tooltip />
               <el-table-column prop="source_category_path" label="分类路径" min-width="260" show-overflow-tooltip />
             </el-table>
-            <el-pagination layout="total, sizes, prev, pager, next" :total="resourceTotal" v-model:current-page="resourceQuery.page" v-model:page-size="resourceQuery.page_size" :page-sizes="[20, 50, 100, 200]" @change="loadTrustedResources" />
+            <div class="cursor-pager">
+              <span>Total {{ resourceTotal }}</span>
+              <el-select v-model="resourceQuery.page_size" style="width: 132px" @change="resetTrustedResources">
+                <el-option v-for="size in pageSizeOptions" :key="size" :label="`${size}/page`" :value="size" />
+              </el-select>
+              <el-button :disabled="resourcePager.page <= 1" @click="prevCursorPage(resourcePager, loadTrustedResources)">上一页</el-button>
+              <span>第 {{ resourcePager.page }} 页</span>
+              <el-button :disabled="!resourcePager.hasMore" @click="nextCursorPage(resourcePager, loadTrustedResources)">下一页</el-button>
+            </div>
           </el-tab-pane>
           <el-tab-pane label="分类同步队列" name="queue">
             <el-table :data="sourceCategories" :height="trustedResourceTableHeight">
@@ -739,6 +779,7 @@ const trustedResourceTableHeight = 'calc(100vh - 540px)'
 const sourceQueueTableHeight = '220px'
 const collectionTableHeight = 'calc(100vh - 230px)'
 const plainTableHeight = 'calc(100vh - 170px)'
+const pageSizeOptions = [20, 50, 100, 200]
 
 const urlQuery = reactive({ page: 1, page_size: 50, q: '', status: '', check_frequency: '' })
 const documentQuery = reactive({
@@ -758,22 +799,84 @@ const resourceQuery = reactive({ page: 1, page_size: 50, q: '', source_status: '
 const urlForm = reactive({ url: '', source_name: '', source_unit: '', source_type: '文件直链', category: '标准规范', check_frequency: 'manual' })
 const documentForm = reactive({ title: '', standard_no: '', category: '', issuing_authority: '' })
 
+type CursorPager = {
+  page: number
+  cursors: Array<number | null>
+  nextCursor?: number | null
+  hasMore: boolean
+}
+
+const urlPager = reactive<CursorPager>({ page: 1, cursors: [null], nextCursor: null, hasMore: false })
+const documentPager = reactive<CursorPager>({ page: 1, cursors: [null], nextCursor: null, hasMore: false })
+const alertPager = reactive<CursorPager>({ page: 1, cursors: [null], nextCursor: null, hasMore: false })
+const resourcePager = reactive<CursorPager>({ page: 1, cursors: [null], nextCursor: null, hasMore: false })
+
+function resetCursorPager(pager: CursorPager) {
+  pager.page = 1
+  pager.cursors = [null]
+  pager.nextCursor = null
+  pager.hasMore = false
+}
+
+function pageParams<T extends { page: number }>(query: T, pager: CursorPager) {
+  const { page: _page, ...params } = query
+  const cursor = pager.cursors[pager.page - 1]
+  return { ...params, cursor: cursor ?? undefined }
+}
+
+function applyPageResult<T extends { page: number }>(query: T, pager: CursorPager, page: Page<unknown>) {
+  query.page = pager.page
+  pager.nextCursor = page.next_cursor ?? null
+  pager.hasMore = Boolean(page.has_more)
+}
+
+async function nextCursorPage(pager: CursorPager, loader: () => Promise<void>) {
+  if (!pager.hasMore || !pager.nextCursor) return
+  pager.cursors[pager.page] = pager.nextCursor
+  pager.page += 1
+  await loader()
+}
+
+async function prevCursorPage(pager: CursorPager, loader: () => Promise<void>) {
+  if (pager.page <= 1) return
+  pager.page -= 1
+  await loader()
+}
+
 async function loadUrlSources() {
-  const res = await api.get<Page<UrlSource>>('/url-sources/page', { params: urlQuery })
+  const res = await api.get<Page<UrlSource>>('/url-sources/page', { params: pageParams(urlQuery, urlPager) })
   urlSources.value = res.data.items
   urlTotal.value = res.data.total
+  applyPageResult(urlQuery, urlPager, res.data)
 }
 
 async function loadDocuments() {
-  const res = await api.get<Page<DocumentItem>>('/documents/page', { params: documentQuery })
+  const res = await api.get<Page<DocumentItem>>('/documents/page', { params: pageParams(documentQuery, documentPager) })
   documents.value = res.data.items
   documentTotal.value = res.data.total
+  applyPageResult(documentQuery, documentPager, res.data)
 }
 
 async function loadAlerts() {
-  const res = await api.get<Page<Alert>>('/alerts/page', { params: alertQuery })
+  const res = await api.get<Page<Alert>>('/alerts/page', { params: pageParams(alertQuery, alertPager) })
   alerts.value = res.data.items
   alertTotal.value = res.data.total
+  applyPageResult(alertQuery, alertPager, res.data)
+}
+
+async function resetUrlSources() {
+  resetCursorPager(urlPager)
+  await loadUrlSources()
+}
+
+async function resetDocuments() {
+  resetCursorPager(documentPager)
+  await loadDocuments()
+}
+
+async function resetAlerts() {
+  resetCursorPager(alertPager)
+  await loadAlerts()
 }
 
 async function loadCounts() {
@@ -983,10 +1086,16 @@ async function loadTrustedResources() {
     await loadSourceCategories()
   }
   const res = await api.get<Page<StandardResource>>('/standard-resources/page', {
-    params: { ...resourceQuery, source_id: selectedTrustedSourceId.value },
+    params: { ...pageParams(resourceQuery, resourcePager), source_id: selectedTrustedSourceId.value },
   })
   trustedResources.value = res.data.items
   resourceTotal.value = res.data.total
+  applyPageResult(resourceQuery, resourcePager, res.data)
+}
+
+async function resetTrustedResources() {
+  resetCursorPager(resourcePager)
+  await loadTrustedResources()
 }
 
 async function loadTrustedSources() {

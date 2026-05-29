@@ -53,6 +53,15 @@ body {
   justify-content: flex-end;
 }
 
+.cursor-pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 12px;
+  color: #4b5563;
+}
+
 .el-table .cell {
   white-space: nowrap;
   overflow: hidden;
