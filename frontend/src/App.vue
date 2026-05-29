@@ -71,7 +71,7 @@
           <el-table-column prop="category" label="分类" width="120" />
           <el-table-column prop="check_frequency" label="频率" width="100" />
           <el-table-column prop="status" label="状态" width="90" />
-          <el-table-column prop="last_checked_at" label="最后检查" width="180" />
+          <el-table-column prop="last_checked_at" label="最后检查" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
           <el-table-column label="操作" width="120" fixed="right">
             <template #default="{ row }"><el-button size="small" :loading="checkingSourceId === row.id" @click="checkSource(row.id)">检查</el-button></template>
           </el-table-column>
@@ -92,7 +92,7 @@
           <el-table-column prop="source_name" label="来源名称" min-width="260" show-overflow-tooltip />
           <el-table-column prop="status" label="链接状态" width="110" />
           <el-table-column prop="error_message" label="异常信息" min-width="260" show-overflow-tooltip />
-          <el-table-column prop="last_checked_at" label="最后检查" width="180" />
+          <el-table-column prop="last_checked_at" label="最后检查" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
           <el-table-column label="操作" width="120">
             <template #default="{ row }"><el-button size="small" @click="checkSource(row.id)">采集</el-button></template>
           </el-table-column>
@@ -110,10 +110,10 @@
           <el-table-column prop="success" label="成功" width="90" />
           <el-table-column prop="failed" label="失败" width="90" />
           <el-table-column prop="last_source_id" label="游标" width="100" />
-          <el-table-column prop="heartbeat_at" label="心跳时间" width="180" />
+          <el-table-column prop="heartbeat_at" label="心跳时间" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
           <el-table-column prop="message" label="说明" min-width="260" show-overflow-tooltip />
-          <el-table-column prop="started_at" label="开始时间" width="180" />
-          <el-table-column prop="finished_at" label="完成时间" width="180" />
+          <el-table-column prop="started_at" label="开始时间" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
+          <el-table-column prop="finished_at" label="完成时间" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
           <el-table-column label="操作" width="110" fixed="right">
             <template #default="{ row }">
               <el-button
@@ -190,7 +190,7 @@
           <el-table-column prop="is_current" label="当前" width="90" />
           <el-table-column prop="file_size" label="大小" width="110" />
           <el-table-column prop="file_hash" label="SHA-256" min-width="240" show-overflow-tooltip />
-          <el-table-column prop="downloaded_at" label="下载时间" width="180" />
+          <el-table-column prop="downloaded_at" label="下载时间" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
         </el-table>
       </section>
 
@@ -232,7 +232,7 @@
           <el-table-column prop="alert_type" label="类型" width="140" />
           <el-table-column prop="message" label="消息" min-width="320" show-overflow-tooltip />
           <el-table-column prop="status" label="状态" width="110" />
-          <el-table-column prop="created_at" label="创建时间" width="180" />
+          <el-table-column prop="created_at" label="创建时间" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
           <el-table-column label="操作" width="260" fixed="right">
             <template #default="{ row }">
               <el-button size="small" :disabled="!row.document_id" @click.stop="openDocumentChainById(row.document_id)">文件链路</el-button>
@@ -298,7 +298,7 @@
             </template>
           </el-table-column>
           <el-table-column prop="description" label="说明" min-width="320" show-overflow-tooltip />
-          <el-table-column prop="updated_at" label="更新时间" width="180" />
+          <el-table-column prop="updated_at" label="更新时间" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
         </el-table>
       </section>
 
@@ -336,9 +336,9 @@
           <el-table-column prop="resource_type" label="资源类型" width="140" />
           <el-table-column prop="source_status" label="可信源状态" width="120" />
           <el-table-column prop="matched_document_count" label="匹配文件" width="100" />
-          <el-table-column prop="publish_date" label="发布日期" width="120" />
-          <el-table-column prop="effective_date" label="实施日期" width="120" />
-          <el-table-column prop="abolish_date" label="废止日期" width="120" />
+          <el-table-column prop="publish_date" label="发布日期" width="120" :formatter="dateFormatter" show-overflow-tooltip />
+          <el-table-column prop="effective_date" label="实施日期" width="120" :formatter="dateFormatter" show-overflow-tooltip />
+          <el-table-column prop="abolish_date" label="废止日期" width="120" :formatter="dateFormatter" show-overflow-tooltip />
           <el-table-column prop="source_category_path" label="分类路径" min-width="260" show-overflow-tooltip />
         </el-table>
         <el-pagination layout="total, sizes, prev, pager, next" :total="resourceTotal" v-model:current-page="resourceQuery.page" v-model:page-size="resourceQuery.page_size" :page-sizes="[20, 50, 100, 200]" @change="loadTrustedResources" />
@@ -348,7 +348,7 @@
           <el-table-column prop="category_path" label="分类路径" min-width="360" show-overflow-tooltip />
           <el-table-column prop="sync_status" label="同步状态" width="110" />
           <el-table-column prop="last_synced_page" label="页数" width="80" />
-          <el-table-column prop="last_sync_finished_at" label="最后完成" width="180" />
+          <el-table-column prop="last_sync_finished_at" label="最后完成" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
           <el-table-column prop="last_sync_error" label="错误" min-width="180" show-overflow-tooltip />
         </el-table>
       </section>
@@ -365,7 +365,7 @@
           <el-table-column prop="match_score" label="分数" width="90" />
           <el-table-column prop="match_reason" label="原因" min-width="260" />
           <el-table-column prop="status" label="状态" width="120" />
-          <el-table-column prop="matched_at" label="匹配时间" width="180" />
+          <el-table-column prop="matched_at" label="匹配时间" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
           <el-table-column label="链路" width="210" fixed="right">
             <template #default="{ row }">
               <el-button size="small" @click.stop="openDocumentChainById(row.document_id)">文件</el-button>
@@ -387,7 +387,7 @@
           <el-table-column prop="new_status" label="新状态" width="140" />
           <el-table-column prop="sync_action" label="动作" width="150" />
           <el-table-column prop="sync_reason" label="原因/证据" min-width="360" show-overflow-tooltip />
-          <el-table-column prop="synced_at" label="同步时间" width="180" />
+          <el-table-column prop="synced_at" label="同步时间" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
           <el-table-column label="链路" width="210" fixed="right">
             <template #default="{ row }">
               <el-button size="small" :disabled="!row.document_id" @click.stop="openDocumentChainById(row.document_id)">文件</el-button>
@@ -412,7 +412,7 @@
           <el-table-column prop="new_value" label="新值" min-width="220" show-overflow-tooltip />
           <el-table-column prop="handled_status" label="处理状态" width="120" />
           <el-table-column prop="evidence_summary" label="证据链" min-width="280" show-overflow-tooltip />
-          <el-table-column prop="detected_at" label="发现时间" width="180" />
+          <el-table-column prop="detected_at" label="发现时间" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
           <el-table-column label="链路" width="210" fixed="right">
             <template #default="{ row }">
               <el-button size="small" :disabled="!row.document_id" @click.stop="openDocumentChainById(row.document_id)">文件</el-button>
@@ -476,7 +476,7 @@
         <el-descriptions-item label="来源状态">{{ resourceChain.resource.source_status }}</el-descriptions-item>
         <el-descriptions-item label="系统判断">{{ resourceChain.resource.system_status }}</el-descriptions-item>
         <el-descriptions-item label="人工复核">{{ resourceChain.resource.manual_status || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="废止日期">{{ resourceChain.resource.abolish_date || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="废止日期">{{ formatDate(resourceChain.resource.abolish_date) }}</el-descriptions-item>
         <el-descriptions-item label="来源详情页" :span="2">
           <a v-if="resourceChain.resource.detail_url" :href="resourceChain.resource.detail_url" target="_blank">{{ resourceChain.resource.detail_url }}</a>
           <span v-else>-</span>
@@ -527,7 +527,7 @@
         <el-table-column prop="standard_name" label="标准名称" min-width="320" show-overflow-tooltip />
         <el-table-column prop="source_status" label="来源状态" width="120" />
         <el-table-column prop="system_status" label="系统判断" width="140" />
-        <el-table-column prop="abolish_date" label="废止日期" width="120" />
+        <el-table-column prop="abolish_date" label="废止日期" width="120" :formatter="dateFormatter" show-overflow-tooltip />
         <el-table-column label="操作" width="110">
           <template #default="{ row }"><el-button size="small" @click.stop="openResourceChainById(row.id)">资源链路</el-button></template>
         </el-table-column>
@@ -553,6 +553,30 @@ import { Aim, Bell, CircleCheck, DataBoard, Document, Download, Files, Link, Med
 import { ElMessage } from 'element-plus'
 import { api, type Alert, type CollectionTask, type DocumentChain, type DocumentItem, type DocumentVersion, type Page, type ResourceChain, type SourceCategory, type SourceStatusSyncLog, type StandardChangeLog, type StandardFileMatch, type StandardResource, type StorageBrowse, type StorageStatus, type SystemSetting, type TrustedSource, type UrlSource } from './api'
 
+function formatDateTime(value?: string | null) {
+  if (!value) return '-'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return String(value).replace('T', ' ').replace(/\.\d+/, '')
+  }
+  const pad = (num: number) => String(num).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
+function formatDate(value?: string | null) {
+  if (!value) return '-'
+  const normalized = formatDateTime(value)
+  return normalized === '-' ? normalized : normalized.slice(0, 10)
+}
+
+function dateTimeFormatter(_row: unknown, _column: unknown, value?: string | null) {
+  return formatDateTime(value)
+}
+
+function dateFormatter(_row: unknown, _column: unknown, value?: string | null) {
+  return formatDate(value)
+}
+
 const ChainTables = defineComponent({
   props: {
     versions: { type: Array, required: true },
@@ -563,13 +587,14 @@ const ChainTables = defineComponent({
     relations: { type: Array, required: true },
     alerts: { type: Array, required: true },
   },
+  methods: { dateTimeFormatter },
   template: `
     <h3 class="section-title">来源 URL</h3>
     <el-table :data="urlSources" height="180">
       <el-table-column prop="source_name" label="来源名称" width="220" show-overflow-tooltip />
       <el-table-column prop="url" label="URL" min-width="360" show-overflow-tooltip />
       <el-table-column prop="status" label="状态" width="100" />
-      <el-table-column prop="last_checked_at" label="最后检查" width="180" />
+      <el-table-column prop="last_checked_at" label="最后检查" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
     </el-table>
 
     <h3 class="section-title">版本记录</h3>
@@ -579,7 +604,7 @@ const ChainTables = defineComponent({
       <el-table-column prop="change_type" label="变化" width="100" />
       <el-table-column prop="is_current" label="当前" width="90" />
       <el-table-column prop="file_hash" label="文件哈希" min-width="240" show-overflow-tooltip />
-      <el-table-column prop="downloaded_at" label="下载时间" width="180" />
+      <el-table-column prop="downloaded_at" label="下载时间" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
     </el-table>
 
     <h3 class="section-title">状态同步记录</h3>
@@ -588,7 +613,7 @@ const ChainTables = defineComponent({
       <el-table-column prop="new_status" label="新状态" width="140" />
       <el-table-column prop="sync_action" label="动作" width="150" />
       <el-table-column prop="sync_reason" label="原因/证据" min-width="420" show-overflow-tooltip />
-      <el-table-column prop="synced_at" label="同步时间" width="180" />
+      <el-table-column prop="synced_at" label="同步时间" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
     </el-table>
 
     <h3 class="section-title">变更记录</h3>
@@ -598,7 +623,7 @@ const ChainTables = defineComponent({
       <el-table-column prop="old_value" label="旧值" min-width="220" show-overflow-tooltip />
       <el-table-column prop="new_value" label="新值" min-width="220" show-overflow-tooltip />
       <el-table-column prop="evidence_summary" label="证据说明" min-width="260" show-overflow-tooltip />
-      <el-table-column prop="detected_at" label="发现时间" width="180" />
+      <el-table-column prop="detected_at" label="发现时间" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
     </el-table>
 
     <h3 class="section-title">证据记录</h3>
@@ -609,7 +634,7 @@ const ChainTables = defineComponent({
       <el-table-column prop="parsed_status" label="解析结果" width="140" />
       <el-table-column prop="evidence_note" label="证据说明" min-width="360" show-overflow-tooltip />
       <el-table-column prop="source_url" label="原始 URL" min-width="280" show-overflow-tooltip />
-      <el-table-column prop="captured_at" label="抓取时间" width="180" />
+      <el-table-column prop="captured_at" label="抓取时间" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
     </el-table>
 
     <h3 class="section-title">替代/相关关系</h3>
@@ -633,7 +658,7 @@ const ChainTables = defineComponent({
       <el-table-column prop="alert_type" label="类型" width="140" />
       <el-table-column prop="message" label="消息" min-width="360" show-overflow-tooltip />
       <el-table-column prop="status" label="状态" width="110" />
-      <el-table-column prop="created_at" label="创建时间" width="180" />
+      <el-table-column prop="created_at" label="创建时间" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
     </el-table>
   `,
 })

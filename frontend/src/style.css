@@ -53,6 +53,16 @@ body {
   justify-content: flex-end;
 }
 
+.el-table .cell {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.el-table th .cell {
+  white-space: nowrap;
+}
+
 .row-actions {
   display: flex;
   align-items: center;
