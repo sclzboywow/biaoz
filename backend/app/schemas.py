@@ -426,6 +426,13 @@ class StandardFileMatchOut(OrmModel):
     status: str
 
 
+class StandardFileMatchPage(BaseModel):
+    total: int
+    items: list[StandardFileMatchOut]
+    next_cursor: int | None = None
+    has_more: bool = False
+
+
 class StandardChangeLogOut(OrmModel):
     id: int
     standard_resource_id: int
@@ -441,6 +448,13 @@ class StandardChangeLogOut(OrmModel):
     evidence_summary: str | None = None
 
 
+class StandardChangeLogPage(BaseModel):
+    total: int
+    items: list[StandardChangeLogOut]
+    next_cursor: int | None = None
+    has_more: bool = False
+
+
 class SourceStatusSyncLogOut(OrmModel):
     id: int
     standard_resource_id: int
@@ -450,6 +464,13 @@ class SourceStatusSyncLogOut(OrmModel):
     sync_action: str | None = None
     sync_reason: str | None = None
     synced_at: datetime
+
+
+class SourceStatusSyncLogPage(BaseModel):
+    total: int
+    items: list[SourceStatusSyncLogOut]
+    next_cursor: int | None = None
+    has_more: bool = False
 
 
 class StandardEvidenceOut(OrmModel):

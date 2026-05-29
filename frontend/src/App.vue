@@ -115,6 +115,15 @@
                 <template #default="{ row }"><el-button size="small" @click="checkSource(row.id)">采集</el-button></template>
               </el-table-column>
             </el-table>
+            <div class="cursor-pager">
+              <span>Total {{ urlTotal }}</span>
+              <el-select v-model="urlQuery.page_size" style="width: 132px" @change="resetUrlSources">
+                <el-option v-for="size in pageSizeOptions" :key="size" :label="`${size}/page`" :value="size" />
+              </el-select>
+              <el-button :disabled="urlPager.page <= 1" @click="prevCursorPage(urlPager, loadUrlSources)">上一页</el-button>
+              <span>第 {{ urlPager.page }} 页</span>
+              <el-button :disabled="!urlPager.hasMore" @click="nextCursorPage(urlPager, loadUrlSources)">下一页</el-button>
+            </div>
           </el-tab-pane>
           <el-tab-pane label="后台任务进度" name="tasks">
             <el-table :data="collectionTasks" :height="collectionTableHeight">
@@ -423,6 +432,15 @@
             </template>
           </el-table-column>
         </el-table>
+        <div class="cursor-pager">
+          <span>Total {{ fileMatchTotal }}</span>
+          <el-select v-model="fileMatchQuery.page_size" style="width: 132px" @change="resetFileMatches">
+            <el-option v-for="size in pageSizeOptions" :key="size" :label="`${size}/page`" :value="size" />
+          </el-select>
+          <el-button :disabled="fileMatchPager.page <= 1" @click="prevCursorPage(fileMatchPager, loadFileMatches)">上一页</el-button>
+          <span>第 {{ fileMatchPager.page }} 页</span>
+          <el-button :disabled="!fileMatchPager.hasMore" @click="nextCursorPage(fileMatchPager, loadFileMatches)">下一页</el-button>
+        </div>
       </section>
 
       <section v-if="activeView === 'statusSyncLogs'" class="panel">
@@ -445,6 +463,15 @@
             </template>
           </el-table-column>
         </el-table>
+        <div class="cursor-pager">
+          <span>Total {{ statusSyncTotal }}</span>
+          <el-select v-model="statusSyncQuery.page_size" style="width: 132px" @change="resetStatusSyncLogs">
+            <el-option v-for="size in pageSizeOptions" :key="size" :label="`${size}/page`" :value="size" />
+          </el-select>
+          <el-button :disabled="statusSyncPager.page <= 1" @click="prevCursorPage(statusSyncPager, loadStatusSyncLogs)">上一页</el-button>
+          <span>第 {{ statusSyncPager.page }} 页</span>
+          <el-button :disabled="!statusSyncPager.hasMore" @click="nextCursorPage(statusSyncPager, loadStatusSyncLogs)">下一页</el-button>
+        </div>
       </section>
 
       <section v-if="activeView === 'sourceChanges'" class="panel">
@@ -470,6 +497,15 @@
             </template>
           </el-table-column>
         </el-table>
+        <div class="cursor-pager">
+          <span>Total {{ sourceChangeTotal }}</span>
+          <el-select v-model="sourceChangeQuery.page_size" style="width: 132px" @change="resetSourceChanges">
+            <el-option v-for="size in pageSizeOptions" :key="size" :label="`${size}/page`" :value="size" />
+          </el-select>
+          <el-button :disabled="sourceChangePager.page <= 1" @click="prevCursorPage(sourceChangePager, loadSourceChanges)">上一页</el-button>
+          <span>第 {{ sourceChangePager.page }} 页</span>
+          <el-button :disabled="!sourceChangePager.hasMore" @click="nextCursorPage(sourceChangePager, loadSourceChanges)">下一页</el-button>
+        </div>
       </section>
     </el-main>
   </el-container>
@@ -756,6 +792,9 @@ const urlTotal = ref(0)
 const documentTotal = ref(0)
 const alertTotal = ref(0)
 const resourceTotal = ref(0)
+const fileMatchTotal = ref(0)
+const statusSyncTotal = ref(0)
+const sourceChangeTotal = ref(0)
 const pendingReviewCount = ref(0)
 const pendingAlertCount = ref(0)
 
@@ -794,6 +833,9 @@ const documentQuery = reactive({
 })
 const alertQuery = reactive({ page: 1, page_size: 50, q: '', status: '未处理' })
 const resourceQuery = reactive({ page: 1, page_size: 50, q: '', source_status: '', resource_type: '' })
+const fileMatchQuery = reactive({ page: 1, page_size: 50 })
+const statusSyncQuery = reactive({ page: 1, page_size: 50 })
+const sourceChangeQuery = reactive({ page: 1, page_size: 50 })
 
 const urlForm = reactive({ url: '', source_name: '', source_unit: '', source_type: '文件直链', category: '标准规范', check_frequency: 'manual' })
 const documentForm = reactive({ title: '', standard_no: '', category: '', issuing_authority: '' })
@@ -809,6 +851,9 @@ const urlPager = reactive<CursorPager>({ page: 1, cursors: [null], nextCursor: n
 const documentPager = reactive<CursorPager>({ page: 1, cursors: [null], nextCursor: null, hasMore: false })
 const alertPager = reactive<CursorPager>({ page: 1, cursors: [null], nextCursor: null, hasMore: false })
 const resourcePager = reactive<CursorPager>({ page: 1, cursors: [null], nextCursor: null, hasMore: false })
+const fileMatchPager = reactive<CursorPager>({ page: 1, cursors: [null], nextCursor: null, hasMore: false })
+const statusSyncPager = reactive<CursorPager>({ page: 1, cursors: [null], nextCursor: null, hasMore: false })
+const sourceChangePager = reactive<CursorPager>({ page: 1, cursors: [null], nextCursor: null, hasMore: false })
 
 function resetCursorPager(pager: CursorPager) {
   pager.page = 1
@@ -876,6 +921,21 @@ async function resetDocuments() {
 async function resetAlerts() {
   resetCursorPager(alertPager)
   await loadAlerts()
+}
+
+async function resetFileMatches() {
+  resetCursorPager(fileMatchPager)
+  await loadFileMatches()
+}
+
+async function resetStatusSyncLogs() {
+  resetCursorPager(statusSyncPager)
+  await loadStatusSyncLogs()
+}
+
+async function resetSourceChanges() {
+  resetCursorPager(sourceChangePager)
+  await loadSourceChanges()
 }
 
 async function loadCounts() {
@@ -1179,8 +1239,10 @@ async function syncPendingCategories() {
 }
 
 async function loadFileMatches() {
-  const res = await api.get<StandardFileMatch[]>('/standard-file-matches')
-  fileMatches.value = res.data
+  const res = await api.get<Page<StandardFileMatch>>('/standard-file-matches/page', { params: pageParams(fileMatchQuery, fileMatchPager) })
+  fileMatches.value = res.data.items
+  fileMatchTotal.value = res.data.total
+  applyPageResult(fileMatchQuery, fileMatchPager, res.data)
 }
 
 async function runFileMatch() {
@@ -1190,13 +1252,17 @@ async function runFileMatch() {
 }
 
 async function loadSourceChanges() {
-  const res = await api.get<StandardChangeLog[]>('/standard-change-logs')
-  sourceChanges.value = res.data
+  const res = await api.get<Page<StandardChangeLog>>('/standard-change-logs/page', { params: pageParams(sourceChangeQuery, sourceChangePager) })
+  sourceChanges.value = res.data.items
+  sourceChangeTotal.value = res.data.total
+  applyPageResult(sourceChangeQuery, sourceChangePager, res.data)
 }
 
 async function loadStatusSyncLogs() {
-  const res = await api.get<SourceStatusSyncLog[]>('/source-status-sync-logs')
-  statusSyncLogs.value = res.data
+  const res = await api.get<Page<SourceStatusSyncLog>>('/source-status-sync-logs/page', { params: pageParams(statusSyncQuery, statusSyncPager) })
+  statusSyncLogs.value = res.data.items
+  statusSyncTotal.value = res.data.total
+  applyPageResult(statusSyncQuery, statusSyncPager, res.data)
 }
 
 onMounted(loadAll)

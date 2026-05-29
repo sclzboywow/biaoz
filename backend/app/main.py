@@ -724,14 +724,53 @@ def list_standard_file_matches(limit: int = 100, db: Session = Depends(get_db)):
     return list(db.scalars(select(models.StandardFileMatch).order_by(desc(models.StandardFileMatch.id)).limit(limit)))
 
 
+@api.get("/standard-file-matches/page", response_model=schemas.StandardFileMatchPage)
+def page_standard_file_matches(
+    page_size: int = 50,
+    cursor: int | None = None,
+    db: Session = Depends(get_db),
+):
+    page_size = min(max(page_size, 1), 200)
+    statement = select(models.StandardFileMatch)
+    total = db.scalar(select(func.count(models.StandardFileMatch.id))) or 0
+    items, next_cursor, has_more = cursor_window(db, statement, models.StandardFileMatch.id, page_size, cursor)
+    return schemas.StandardFileMatchPage(total=total, items=items, next_cursor=next_cursor, has_more=has_more)
+
+
 @api.get("/standard-change-logs", response_model=list[schemas.StandardChangeLogOut])
 def list_standard_change_logs(limit: int = 100, db: Session = Depends(get_db)):
     return list(db.scalars(select(models.StandardChangeLog).order_by(desc(models.StandardChangeLog.id)).limit(limit)))
 
 
+@api.get("/standard-change-logs/page", response_model=schemas.StandardChangeLogPage)
+def page_standard_change_logs(
+    page_size: int = 50,
+    cursor: int | None = None,
+    db: Session = Depends(get_db),
+):
+    page_size = min(max(page_size, 1), 200)
+    statement = select(models.StandardChangeLog)
+    total = db.scalar(select(func.count(models.StandardChangeLog.id))) or 0
+    items, next_cursor, has_more = cursor_window(db, statement, models.StandardChangeLog.id, page_size, cursor)
+    return schemas.StandardChangeLogPage(total=total, items=items, next_cursor=next_cursor, has_more=has_more)
+
+
 @api.get("/source-status-sync-logs", response_model=list[schemas.SourceStatusSyncLogOut])
 def list_source_status_sync_logs(limit: int = 100, db: Session = Depends(get_db)):
     return list(db.scalars(select(models.SourceStatusSyncLog).order_by(desc(models.SourceStatusSyncLog.id)).limit(limit)))
+
+
+@api.get("/source-status-sync-logs/page", response_model=schemas.SourceStatusSyncLogPage)
+def page_source_status_sync_logs(
+    page_size: int = 50,
+    cursor: int | None = None,
+    db: Session = Depends(get_db),
+):
+    page_size = min(max(page_size, 1), 200)
+    statement = select(models.SourceStatusSyncLog)
+    total = db.scalar(select(func.count(models.SourceStatusSyncLog.id))) or 0
+    items, next_cursor, has_more = cursor_window(db, statement, models.SourceStatusSyncLog.id, page_size, cursor)
+    return schemas.SourceStatusSyncLogPage(total=total, items=items, next_cursor=next_cursor, has_more=has_more)
 
 
 @api.patch("/standard-relations/{relation_id}", response_model=schemas.StandardRelationOut)
