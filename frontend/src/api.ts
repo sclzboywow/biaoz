@@ -1,8 +1,18 @@
-import axios from 'axios'
+import axios, { type AxiosError } from 'axios'
 
 export const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1',
+  timeout: Number(import.meta.env.VITE_API_TIMEOUT_MS || 60_000),
 })
+
+api.interceptors.response.use(
+  response => response,
+  (error: AxiosError<{ detail?: string }>) => {
+    const detail = error.response?.data?.detail
+    const userMessage = typeof detail === 'string' ? detail : error.message
+    return Promise.reject(Object.assign(error, { userMessage }))
+  },
+)
 
 export type UrlSource = {
   id: number
@@ -62,6 +72,8 @@ export type Page<T> = {
 export type DocumentVersion = {
   id: number
   document_id: number
+  document_title?: string
+  standard_no?: string
   url_source_id?: number
   version_no?: string
   file_name: string
@@ -181,6 +193,20 @@ export type StandardResource = {
   matched_document_count?: number
 }
 
+export type StandardDetail = {
+  id: number
+  standard_resource_id: number
+  catalog_text?: string
+  mandatory_provisions?: string
+  expert_interpretation?: string
+  product_info?: string
+  change_info?: string
+  related_books?: string
+  raw_html_path?: string
+  raw_text_path?: string
+  captured_at: string
+}
+
 export type StandardFileMatch = {
   id: number
   standard_resource_id: number
@@ -196,7 +222,10 @@ export type StandardChangeLog = {
   id: number
   standard_resource_id: number
   document_id?: number
+  document_title?: string
   document_version_id?: number
+  version_no?: string
+  file_name?: string
   field_name: string
   old_value?: string
   new_value?: string
@@ -247,6 +276,7 @@ export type StandardRelation = {
 
 export type ResourceChain = {
   resource: StandardResource
+  details: StandardDetail[]
   matches: StandardFileMatch[]
   documents: DocumentItem[]
   versions: DocumentVersion[]

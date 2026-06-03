@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.standard_number import normalize_standard_no
-from app.status_calibration import attach_change_logs_to_documents, calibrate_resource_status
+from app.status_calibration import CHANGE_FIELD_LABELS, attach_change_logs_to_documents, calibrate_resource_status
 from app.trusted_source_adapters import TrustedSourceAdapter, TrustedSourceSyncOptions, TrustedSourceSyncStats, registry
 
 BASE_URL = "https://ebook.chinabuilding.com.cn"
@@ -25,7 +25,6 @@ MONITORED_CHANGE_FIELDS = {
     "publish_date",
     "effective_date",
     "abolish_date",
-    "detail_hash",
     "change_info",
 }
 
@@ -186,6 +185,17 @@ def _extract_label_value(labels: list[str], html: str, maxlen: int = 300) -> str
     return None
 
 
+def _valid_resource_type(value: str | None) -> str | None:
+    if not value:
+        return None
+    cleaned = value.strip()
+    if re.search(r"(发布|出版|实施|废止|入库)?日期\s*[:：]?\s*\d{4}", cleaned):
+        return None
+    if re.search(r"\d{4}[-/.年]\d{1,2}", cleaned):
+        return None
+    return cleaned
+
+
 def _extract_section(html: str, labels: list[str], max_chars: int = 5000) -> str | None:
     for label in labels:
         match = re.search(label + r"[\s\S]{0,120}?(<div[\s\S]{0," + str(max_chars) + r"}?</div>)", html)
@@ -196,6 +206,39 @@ def _extract_section(html: str, labels: list[str], max_chars: int = 5000) -> str
     return None
 
 
+def _resolve_pdf_file_url(client: httpx.Client, book_id: str) -> str:
+    reader_url = f"{BASE_URL}/zbooklib/bookpdf/probation?SiteID=1&bookID={book_id}"
+    try:
+        response = client.get(reader_url)
+        response.raise_for_status()
+    except httpx.HTTPError:
+        return reader_url
+
+    html = response.text
+    prefix_match = re.search(r'absolute_path_prefix="([^"]+)"', html)
+    if not prefix_match:
+        return reader_url
+
+    prefix = prefix_match.group(1)
+    candidates: list[str] = []
+    for href in re.findall(r'href="([^"]+\.css)"', html, flags=re.IGNORECASE):
+        name = href.rsplit("/", 1)[-1]
+        if name in {"base.min.css", "fancy.min.css"}:
+            continue
+        candidates.append(prefix + name[:-4] + ".pdf")
+
+    for url in candidates:
+        try:
+            pdf_response = client.get(url, headers={"Range": "bytes=0-31"})
+        except httpx.HTTPError:
+            continue
+        content_type = (pdf_response.headers.get("content-type") or "").lower()
+        if pdf_response.status_code in {200, 206} and "pdf" in content_type and pdf_response.content.startswith(b"%PDF"):
+            return url
+
+    return reader_url
+
+
 def fetch_detail(client: httpx.Client, book_id: str) -> dict[str, Any]:
     detail_url = f"{BASE_URL}/zbooklib/book/detail/show?SiteID=1&bookID={book_id}"
     response = client.get(detail_url)
@@ -204,7 +247,7 @@ def fetch_detail(client: httpx.Client, book_id: str) -> dict[str, Any]:
     detail_hash = hashlib.sha256(html.encode("utf-8", errors="ignore")).hexdigest()
 
     cover_match = re.search(r"var\s+sharePic\s*=\s*'([^']+)'", html)
-    pdf_trial_url = f"{BASE_URL}/zbooklib/bookpdf/probation?SiteID=1&bookID={book_id}"
+    pdf_trial_url = _resolve_pdf_file_url(client, book_id)
 
     return {
         "detail_url": detail_url,
@@ -215,7 +258,7 @@ def fetch_detail(client: httpx.Client, book_id: str) -> dict[str, Any]:
         "abolish_date": _pick_date("废止", html),
         "storage_date": _pick_date("入库", html),
         "chief_editor_unit": _extract_label_value(["主编单位", "起草单位", "编制单位", "参编单位"], html, 500),
-        "resource_type": _extract_label_value(["资源类型", "标准类型", "图书类型"], html, 120),
+        "resource_type": _valid_resource_type(_extract_label_value(["资源类型", "标准类型", "图书类型"], html, 120)),
         "summary": _extract_section(html, ["简介", "内容简介"]),
         "catalog_text": _extract_section(html, ["目录"]),
         "mandatory_provisions": _extract_section(html, ["强制性条文", "强条"]),
@@ -260,6 +303,8 @@ def _record_change(
             new_value=new_text,
             change_type="字段变化",
             source_url=resource.detail_url,
+            handled_status="已处理",
+            evidence_summary=f"可信源{CHANGE_FIELD_LABELS.get(field_name, field_name)}发生变化",
         )
     )
 
@@ -385,7 +430,7 @@ def _upsert_resource(
     if detail:
         updates.update(
             {
-                "resource_type": detail.get("resource_type") or sublib.category_name,
+                "resource_type": _valid_resource_type(detail.get("resource_type")) or sublib.category_name,
                 "publish_date": detail.get("publish_date"),
                 "effective_date": detail.get("effective_date"),
                 "abolish_date": detail.get("abolish_date"),
@@ -489,7 +534,7 @@ def sync_guobiao_resources(
     ensure_source_categories(db, source)
 
     selected = _sublibs_from_categories(db, source, sublib_id, only_pending_categories, category_limit)
-    if not selected:
+    if not selected and not only_pending_categories:
         selected = [item for item in SUBLIBS if sublib_id is None or item.sublib_id == sublib_id]
     stats = {
         "pages": 0,
@@ -513,9 +558,13 @@ def sync_guobiao_resources(
                 category.last_sync_error = None
                 db.commit()
             stats["categories"] += 1
-            pages = min(max_pages_per_sublib, sublib.total_pages_hint)
+            total_pages = max(1, sublib.total_pages_hint)
+            start_page = 1
+            if only_pending_categories and category and category.last_synced_page:
+                start_page = min(category.last_synced_page + 1, total_pages)
+            end_page = min(start_page + max_pages_per_sublib - 1, total_pages)
             category_errors = 0
-            for page_index in range(1, pages + 1):
+            for page_index in range(start_page, end_page + 1):
                 list_url = (
                     f"{BASE_URL}/zbooklib/sublibBook/resultlist?SiteID=1&viewType=imgView"
                     f"&sublibID={sublib.sublib_id}&sortType=Default&abolish=&indexInfor=&PageIndex={page_index}"
@@ -543,8 +592,8 @@ def sync_guobiao_resources(
                         .first()
                     )
                     detail = None
-                    should_fetch_detail = include_detail and (
-                        existing is None or not existing.detail_hash
+                    should_fetch_detail = existing is None or (
+                        include_detail and not existing.detail_hash
                     )
                     if should_fetch_detail:
                         try:
@@ -565,7 +614,8 @@ def sync_guobiao_resources(
                 db.commit()
             if category:
                 category.last_sync_finished_at = datetime.now(UTC)
-                category.sync_status = "同步失败" if category_errors else "已同步"
+                completed = (category.last_synced_page or 0) >= total_pages
+                category.sync_status = "同步失败" if category_errors else ("已同步" if completed else "待同步")
                 category.last_sync_error = f"{category_errors} 个采集错误" if category_errors else None
                 db.commit()
     return stats

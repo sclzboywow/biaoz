@@ -24,7 +24,7 @@
           <div class="metric">URL 来源<strong>{{ urlTotal }}</strong></div>
           <div class="metric">文件库<strong>{{ documentTotal }}</strong></div>
           <div class="metric">待复核<strong>{{ pendingReviewCount }}</strong></div>
-          <div class="metric">未处理提醒<strong>{{ pendingAlertCount }}</strong></div>
+          <div class="metric">已处理提醒<strong>{{ pendingAlertCount }}</strong></div>
         </div>
         <div class="panel">
           <div class="toolbar">
@@ -217,19 +217,35 @@
       <section v-if="activeView === 'versions'" class="panel">
         <div class="toolbar">
           <h2>版本管理</h2>
-          <el-select v-model="selectedDocumentId" filterable placeholder="选择文件" style="width: 420px" @change="loadVersions">
-            <el-option v-for="item in documents" :key="item.id" :label="item.title" :value="item.id" />
-          </el-select>
+          <el-button :icon="Refresh" @click="resetVersions">刷新</el-button>
         </div>
-        <el-table :data="versions" :height="plainTableHeight">
+        <el-table :data="versions" :height="pagedTableHeight">
+          <el-table-column prop="document_id" label="文件ID" width="90" />
+          <el-table-column prop="standard_no" label="标准编号" width="150" show-overflow-tooltip />
           <el-table-column prop="version_no" label="版本" width="90" />
-          <el-table-column prop="file_name" label="文件名" min-width="280" show-overflow-tooltip />
+          <el-table-column prop="document_title" label="文件标题" min-width="320" show-overflow-tooltip />
+          <el-table-column prop="file_name" label="归档文件名" min-width="220" show-overflow-tooltip />
           <el-table-column prop="change_type" label="变化" width="100" />
           <el-table-column prop="is_current" label="当前" width="90" />
-          <el-table-column prop="file_size" label="大小" width="110" />
+          <el-table-column prop="file_size" label="大小(MB)" width="110" :formatter="fileSizeMbFormatter" />
           <el-table-column prop="file_hash" label="SHA-256" min-width="240" show-overflow-tooltip />
           <el-table-column prop="downloaded_at" label="下载时间" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
+          <el-table-column label="文件" width="150" fixed="right">
+            <template #default="{ row }">
+              <el-button size="small" @click="openVersionFile(row, true)">预览</el-button>
+              <el-button size="small" @click="openVersionFile(row, false)">下载</el-button>
+            </template>
+          </el-table-column>
         </el-table>
+        <div class="cursor-pager">
+          <span>Total {{ versionTotal }}</span>
+          <el-select v-model="versionQuery.page_size" style="width: 132px" @change="resetVersions">
+            <el-option v-for="size in pageSizeOptions" :key="size" :label="`${size}/page`" :value="size" />
+          </el-select>
+          <el-button :disabled="versionPager.page <= 1" @click="prevCursorPage(versionPager, loadVersions)">上一页</el-button>
+          <span>第 {{ versionPager.page }} 页</span>
+          <el-button :disabled="!versionPager.hasMore" @click="nextCursorPage(versionPager, loadVersions)">下一页</el-button>
+        </div>
       </section>
 
       <section v-if="activeView === 'review'" class="panel">
@@ -270,12 +286,12 @@
           <el-table-column prop="alert_type" label="类型" width="140" />
           <el-table-column prop="message" label="消息" min-width="320" show-overflow-tooltip />
           <el-table-column prop="status" label="状态" width="110" />
+          <el-table-column prop="handled_by" label="处理人" width="130" />
+          <el-table-column prop="handled_at" label="处理时间" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
           <el-table-column prop="created_at" label="创建时间" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
-          <el-table-column label="操作" width="260" fixed="right">
+          <el-table-column label="链路" width="110" fixed="right">
             <template #default="{ row }">
               <el-button size="small" :disabled="!row.document_id" @click.stop="openDocumentChainById(row.document_id)">文件链路</el-button>
-              <el-button size="small" type="success" :disabled="row.status !== '未处理'" @click="setAlertStatus(row.id, '已处理')">处理</el-button>
-              <el-button size="small" :disabled="row.status !== '未处理'" @click="setAlertStatus(row.id, '忽略')">忽略</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -357,13 +373,13 @@
             </el-select>
             <el-button :icon="Refresh" @click="loadTrustedResources">刷新</el-button>
             <el-button :loading="discoveringCategories" @click="discoverSourceCategories">发现分类</el-button>
-            <el-button :loading="syncingPendingCategories" @click="syncPendingCategories">同步待同步分类</el-button>
+            <el-button :loading="syncingPendingCategories" @click="syncPendingCategories">批量同步待同步分类</el-button>
             <el-button type="primary" :loading="syncingTrustedSource" @click="syncTrustedSource">同步当前源</el-button>
           </div>
         </div>
         <el-form :inline="true" class="filters">
           <el-form-item label="分类">
-            <el-select v-model="selectedSourceCategoryId" clearable filterable placeholder="选择 sublibID" style="width: 360px">
+            <el-select v-model="selectedSourceCategoryId" clearable filterable placeholder="选择 sublibID" style="width: 360px" @change="resetTrustedResources">
               <el-option
                 v-for="item in sourceCategories"
                 :key="item.id"
@@ -481,14 +497,14 @@
         </div>
         <el-table :data="sourceChanges" :height="plainTableHeight">
           <el-table-column prop="standard_resource_id" label="资源ID" width="110" />
-          <el-table-column prop="document_id" label="本地文件" width="110" />
-          <el-table-column prop="document_version_id" label="版本" width="90" />
-          <el-table-column prop="field_name" label="字段" width="150" />
+          <el-table-column prop="document_title" label="本地文件" min-width="220" :formatter="changeDocumentFormatter" show-overflow-tooltip />
+          <el-table-column prop="version_no" label="版本" min-width="180" :formatter="changeVersionFormatter" show-overflow-tooltip />
+          <el-table-column prop="field_name" label="字段" width="150" :formatter="changeFieldFormatter" />
           <el-table-column prop="change_type" label="变化类型" width="130" />
-          <el-table-column prop="old_value" label="旧值" min-width="220" show-overflow-tooltip />
-          <el-table-column prop="new_value" label="新值" min-width="220" show-overflow-tooltip />
+          <el-table-column prop="old_value" label="旧值" min-width="220" :formatter="changeValueFormatter" show-overflow-tooltip />
+          <el-table-column prop="new_value" label="新值" min-width="220" :formatter="changeValueFormatter" show-overflow-tooltip />
           <el-table-column prop="handled_status" label="处理状态" width="120" />
-          <el-table-column prop="evidence_summary" label="证据链" min-width="280" show-overflow-tooltip />
+          <el-table-column prop="evidence_summary" label="证据链" min-width="280" :formatter="changeEvidenceFormatter" show-overflow-tooltip />
           <el-table-column prop="detected_at" label="发现时间" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
           <el-table-column label="链路" width="210" fixed="right">
             <template #default="{ row }">
@@ -568,6 +584,41 @@
           <span v-else>-</span>
         </el-descriptions-item>
       </el-descriptions>
+
+      <template v-if="resourceChain.details.length">
+        <h3 class="section-title">官方字段与链接</h3>
+        <el-descriptions :column="1" border>
+          <el-descriptions-item label="官方链接">
+            <div v-if="officialLinkEntries(resourceChain.details[0].catalog_text).length" class="link-list">
+              <p v-for="[label, url] in officialLinkEntries(resourceChain.details[0].catalog_text)" :key="label">
+                <strong>{{ label }}</strong>
+                <a :href="url" target="_blank">{{ url }}</a>
+              </p>
+            </div>
+            <span v-else>-</span>
+          </el-descriptions-item>
+          <el-descriptions-item label="官方 gb 字段">
+            <el-table :data="gbFieldEntries(resourceChain.details[0].catalog_text)" max-height="260" size="small">
+              <el-table-column prop="key" label="字段" width="190" />
+              <el-table-column prop="value" label="值" min-width="360" show-overflow-tooltip />
+            </el-table>
+          </el-descriptions-item>
+        </el-descriptions>
+        <el-tabs class="detail-json-tabs">
+          <el-tab-pane label="完整详情 JSON">
+            <pre class="json-block">{{ jsonPretty(resourceChain.details[0].product_info) }}</pre>
+          </el-tab-pane>
+          <el-tab-pane label="替代关系">
+            <pre class="json-block">{{ jsonPretty(resourceChain.details[0].change_info) }}</pre>
+          </el-tab-pane>
+          <el-tab-pane label="相关标准">
+            <pre class="json-block">{{ jsonPretty(resourceChain.details[0].related_books) }}</pre>
+          </el-tab-pane>
+          <el-tab-pane label="人员/ICS/视频">
+            <pre class="json-block">{{ jsonPretty(resourceChain.details[0].expert_interpretation) }}</pre>
+          </el-tab-pane>
+        </el-tabs>
+      </template>
 
       <h3 class="section-title">匹配的本地文件</h3>
       <el-table :data="resourceChain.documents" height="220">
@@ -663,6 +714,87 @@ function dateFormatter(_row: unknown, _column: unknown, value?: string | null) {
   return formatDate(value)
 }
 
+function parseJsonObject(value?: string | null): Record<string, unknown> {
+  if (!value) return {}
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}
+  } catch {
+    return {}
+  }
+}
+
+function jsonPretty(value?: string | null) {
+  if (!value) return '-'
+  try {
+    return JSON.stringify(JSON.parse(value), null, 2)
+  } catch {
+    return value
+  }
+}
+
+function officialLinkEntries(catalogText?: string | null): [string, string][] {
+  const links = parseJsonObject(catalogText).official_links
+  if (!links || typeof links !== 'object' || Array.isArray(links)) return []
+  return Object.entries(links as Record<string, unknown>)
+    .filter((entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1].length > 0)
+}
+
+function gbFieldEntries(catalogText?: string | null) {
+  const fields = parseJsonObject(catalogText).gb_fields
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) return []
+  return Object.entries(fields as Record<string, unknown>).map(([key, value]) => ({
+    key,
+    value: value === null || value === undefined ? '' : String(value),
+  }))
+}
+
+const changeFieldLabels: Record<string, string> = {
+  standard_no: '标准编号',
+  standard_name: '标准名称',
+  source_status: '可信源状态',
+  publish_date: '发布日期',
+  effective_date: '实施日期',
+  abolish_date: '废止日期',
+  change_info: '变更信息',
+  detail_hash: '详情页指纹',
+}
+
+function changeFieldFormatter(row: StandardChangeLog) {
+  return changeFieldLabels[row.field_name] || row.field_name
+}
+
+function changeValueFormatter(row: StandardChangeLog, _column: unknown, value?: string | null) {
+  if (row.field_name === 'detail_hash') return value ? '页面内容已变化' : '无记录'
+  if (value === null || value === undefined || value === '') return '无记录'
+  if (['publish_date', 'effective_date', 'abolish_date'].includes(row.field_name)) return formatDate(value)
+  if (/^[a-f0-9]{48,}$/i.test(String(value))) return '内容指纹'
+  return String(value)
+}
+
+function changeDocumentFormatter(row: StandardChangeLog) {
+  return row.document_title || (row.document_id ? `文件 ${row.document_id}` : '未关联本地文件')
+}
+
+function changeVersionFormatter(row: StandardChangeLog) {
+  if (row.version_no && row.file_name) return `${row.version_no} / ${row.file_name}`
+  if (row.file_name) return row.file_name
+  if (row.document_version_id) return `版本 ${row.document_version_id}`
+  return '未关联版本'
+}
+
+function changeEvidenceFormatter(row: StandardChangeLog) {
+  const field = changeFieldFormatter(row)
+  if (row.field_name === 'detail_hash') return '可信源详情页内容发生变化'
+  const target = row.document_id ? `本地文件 ${row.document_id}` : `可信资源 ${row.standard_resource_id}`
+  return `${target} 的${field}发生变化`
+}
+
+function fileSizeMbFormatter(_row: unknown, _column: unknown, value?: number | null) {
+  if (value === null || value === undefined) return '-'
+  return `${(Number(value) / 1024 / 1024).toFixed(2)} MB`
+}
+
 type StatusLike = {
   source_status?: string | null
   system_status?: string | null
@@ -683,6 +815,15 @@ function manualStatusFormatter(row: StatusLike) {
   return row.manual_status || row.review_status || '-'
 }
 
+function versionFileUrl(versionId: number, inline: boolean) {
+  const baseUrl = String(api.defaults.baseURL || '').replace(/\/$/, '')
+  return `${baseUrl}/document-versions/${versionId}/file?inline=${inline ? 'true' : 'false'}`
+}
+
+function openVersionFile(version: DocumentVersion, inline: boolean) {
+  window.open(versionFileUrl(version.id, inline), '_blank', 'noopener')
+}
+
 const ChainTables = defineComponent({
   props: {
     versions: { type: Array, required: true },
@@ -693,7 +834,18 @@ const ChainTables = defineComponent({
     relations: { type: Array, required: true },
     alerts: { type: Array, required: true },
   },
-  methods: { dateTimeFormatter, sourceStatusFormatter, systemStatusFormatter, manualStatusFormatter },
+  methods: {
+    dateTimeFormatter,
+    sourceStatusFormatter,
+    systemStatusFormatter,
+    manualStatusFormatter,
+    openVersionFile,
+    changeFieldFormatter,
+    changeValueFormatter,
+    changeDocumentFormatter,
+    changeVersionFormatter,
+    changeEvidenceFormatter,
+  },
   template: `
     <h3 class="section-title">来源 URL</h3>
     <el-table :data="urlSources" height="180">
@@ -711,6 +863,12 @@ const ChainTables = defineComponent({
       <el-table-column prop="is_current" label="当前" width="90" />
       <el-table-column prop="file_hash" label="文件哈希" min-width="240" show-overflow-tooltip />
       <el-table-column prop="downloaded_at" label="下载时间" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
+      <el-table-column label="文件" width="150" fixed="right">
+        <template #default="{ row }">
+          <el-button size="small" @click="openVersionFile(row, true)">预览</el-button>
+          <el-button size="small" @click="openVersionFile(row, false)">下载</el-button>
+        </template>
+      </el-table-column>
     </el-table>
 
     <h3 class="section-title">状态同步记录</h3>
@@ -724,11 +882,13 @@ const ChainTables = defineComponent({
 
     <h3 class="section-title">变更记录</h3>
     <el-table :data="changeLogs" height="220">
-      <el-table-column prop="field_name" label="字段" width="150" />
+      <el-table-column prop="document_title" label="本地文件" min-width="220" :formatter="changeDocumentFormatter" show-overflow-tooltip />
+      <el-table-column prop="version_no" label="版本" min-width="180" :formatter="changeVersionFormatter" show-overflow-tooltip />
+      <el-table-column prop="field_name" label="字段" width="150" :formatter="changeFieldFormatter" />
       <el-table-column prop="change_type" label="变化类型" width="130" />
-      <el-table-column prop="old_value" label="旧值" min-width="220" show-overflow-tooltip />
-      <el-table-column prop="new_value" label="新值" min-width="220" show-overflow-tooltip />
-      <el-table-column prop="evidence_summary" label="证据说明" min-width="260" show-overflow-tooltip />
+      <el-table-column prop="old_value" label="旧值" min-width="220" :formatter="changeValueFormatter" show-overflow-tooltip />
+      <el-table-column prop="new_value" label="新值" min-width="220" :formatter="changeValueFormatter" show-overflow-tooltip />
+      <el-table-column prop="evidence_summary" label="证据说明" min-width="260" :formatter="changeEvidenceFormatter" show-overflow-tooltip />
       <el-table-column prop="detected_at" label="发现时间" width="170" :formatter="dateTimeFormatter" show-overflow-tooltip />
     </el-table>
 
@@ -793,6 +953,7 @@ const documentTotal = ref(0)
 const alertTotal = ref(0)
 const resourceTotal = ref(0)
 const fileMatchTotal = ref(0)
+const versionTotal = ref(0)
 const statusSyncTotal = ref(0)
 const sourceChangeTotal = ref(0)
 const pendingReviewCount = ref(0)
@@ -831,8 +992,9 @@ const documentQuery = reactive({
   review_status: '',
   doc_type: '',
 })
-const alertQuery = reactive({ page: 1, page_size: 50, q: '', status: '未处理' })
+const alertQuery = reactive({ page: 1, page_size: 50, q: '', status: '已处理' })
 const resourceQuery = reactive({ page: 1, page_size: 50, q: '', source_status: '', resource_type: '' })
+const versionQuery = reactive({ page: 1, page_size: 50 })
 const fileMatchQuery = reactive({ page: 1, page_size: 50 })
 const statusSyncQuery = reactive({ page: 1, page_size: 50 })
 const sourceChangeQuery = reactive({ page: 1, page_size: 50 })
@@ -851,6 +1013,7 @@ const urlPager = reactive<CursorPager>({ page: 1, cursors: [null], nextCursor: n
 const documentPager = reactive<CursorPager>({ page: 1, cursors: [null], nextCursor: null, hasMore: false })
 const alertPager = reactive<CursorPager>({ page: 1, cursors: [null], nextCursor: null, hasMore: false })
 const resourcePager = reactive<CursorPager>({ page: 1, cursors: [null], nextCursor: null, hasMore: false })
+const versionPager = reactive<CursorPager>({ page: 1, cursors: [null], nextCursor: null, hasMore: false })
 const fileMatchPager = reactive<CursorPager>({ page: 1, cursors: [null], nextCursor: null, hasMore: false })
 const statusSyncPager = reactive<CursorPager>({ page: 1, cursors: [null], nextCursor: null, hasMore: false })
 const sourceChangePager = reactive<CursorPager>({ page: 1, cursors: [null], nextCursor: null, hasMore: false })
@@ -928,6 +1091,11 @@ async function resetFileMatches() {
   await loadFileMatches()
 }
 
+async function resetVersions() {
+  resetCursorPager(versionPager)
+  await loadVersions()
+}
+
 async function resetStatusSyncLogs() {
   resetCursorPager(statusSyncPager)
   await loadStatusSyncLogs()
@@ -940,7 +1108,7 @@ async function resetSourceChanges() {
 
 async function loadCounts() {
   const pendingDocs = await api.get<Page<DocumentItem>>('/documents/page', { params: { page: 1, page_size: 1, system_status: '待复核' } })
-  const pendingAlerts = await api.get<Page<Alert>>('/alerts/page', { params: { page: 1, page_size: 1, status: '未处理' } })
+  const pendingAlerts = await api.get<Page<Alert>>('/alerts/page', { params: { page: 1, page_size: 1, status: '已处理' } })
   pendingReviewCount.value = pendingDocs.data.total
   pendingAlertCount.value = pendingAlerts.data.total
 }
@@ -952,7 +1120,7 @@ async function loadAll() {
 function switchView(view: string) {
   activeView.value = view
   if (view === 'documents') loadDocuments()
-  if (view === 'versions') loadDocuments()
+  if (view === 'versions') loadVersions()
   if (view === 'review') loadPendingReview()
   if (view === 'settings') loadSettings()
   if (view === 'collection') {
@@ -1038,12 +1206,6 @@ async function reviewDocument(id: number, manual_status: string) {
   }
 }
 
-async function setAlertStatus(id: number, status: string) {
-  await api.patch(`/alerts/${id}`, { status, handled_by: 'admin' })
-  ElMessage.success('提醒状态已更新')
-  await Promise.all([loadAlerts(), loadCounts()])
-}
-
 async function selectDocument(row: DocumentItem) {
   selectedDocumentId.value = row.id
   await loadVersions()
@@ -1078,9 +1240,10 @@ async function openDocumentChainById(id?: number) {
 }
 
 async function loadVersions() {
-  if (!selectedDocumentId.value) return
-  const res = await api.get<DocumentVersion[]>(`/documents/${selectedDocumentId.value}/versions`)
-  versions.value = res.data
+  const res = await api.get<Page<DocumentVersion>>('/document-versions/page', { params: pageParams(versionQuery, versionPager) })
+  versions.value = res.data.items
+  versionTotal.value = res.data.total
+  applyPageResult(versionQuery, versionPager, res.data)
 }
 
 async function loadPendingReview() {
@@ -1145,7 +1308,11 @@ async function loadTrustedResources() {
     await loadSourceCategories()
   }
   const res = await api.get<Page<StandardResource>>('/standard-resources/page', {
-    params: { ...pageParams(resourceQuery, resourcePager), source_id: selectedTrustedSourceId.value },
+    params: {
+      ...pageParams(resourceQuery, resourcePager),
+      source_id: selectedTrustedSourceId.value,
+      source_category_id: selectedSourceCategoryId.value,
+    },
   })
   trustedResources.value = res.data.items
   resourceTotal.value = res.data.total
@@ -1225,10 +1392,10 @@ async function syncPendingCategories() {
   try {
     const res = await api.post('/trusted-sources/sync', {
       source_id: selectedTrustedSourceId.value,
-      max_pages: 1,
+      max_pages: 10,
       include_detail: false,
       only_pending_categories: true,
-      category_limit: 5,
+      category_limit: 50,
     })
     ElMessage.success(`同步分类 ${res.data.categories} 个，资源 ${res.data.items} 条，新增 ${res.data.created} 条，跳过详情 ${res.data.skipped_existing_detail} 条`)
     await loadSourceCategories()
@@ -1267,3 +1434,40 @@ async function loadStatusSyncLogs() {
 
 onMounted(loadAll)
 </script>
+
+<style scoped>
+.link-list {
+  display: grid;
+  gap: 6px;
+}
+
+.link-list p {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr);
+  gap: 12px;
+  margin: 0;
+}
+
+.link-list a {
+  overflow-wrap: anywhere;
+}
+
+.detail-json-tabs {
+  margin-top: 12px;
+}
+
+.json-block {
+  max-height: 360px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid #dcdfe6;
+  border-radius: 6px;
+  background: #f7f8fa;
+  color: #1f2937;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+</style>

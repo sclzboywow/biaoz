@@ -24,6 +24,7 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://biaoz:biaoz@postgres:5432/biaoz}
       STORAGE_ROOT: ${STORAGE_ROOT:-/data/standard-docs}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+      COLLECTION_TASK_INLINE_WORKER: ${COLLECTION_TASK_INLINE_WORKER:-false}
     ports:
       - "8000:8000"
     volumes:
@@ -35,13 +36,30 @@ services:
   frontend:
     build:
       context: ./frontend
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000/api/v1}
+        VITE_API_TIMEOUT_MS: ${VITE_API_TIMEOUT_MS:-60000}
     restart: unless-stopped
-    environment:
-      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000/api/v1}
     ports:
-      - "5173:5173"
+      - "5173:80"
     depends_on:
       - api
+
+  collection-worker:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    command: ["python", "-m", "app.collection_worker", "--poll-seconds", "10"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://biaoz:biaoz@postgres:5432/biaoz}
+      STORAGE_ROOT: ${STORAGE_ROOT:-/data/standard-docs}
+    volumes:
+      - document_storage:/data/standard-docs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
 
   n8n:
     image: n8nio/n8n:1.72.1

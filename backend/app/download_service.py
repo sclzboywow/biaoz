@@ -14,6 +14,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from app import models, schemas
+from app.alerts import mark_alert_auto_handled
 from app.standard_number import normalize_standard_no
 from app.storage import check_storage_root, relative_storage_path
 
@@ -71,9 +72,10 @@ def doc_type(file_name: str, content_type: str | None) -> str:
 
 def extract_standard_no(source: models.UrlSource) -> str | None:
     text = source.remark or ""
-    match = re.search(r"编号：([^；]+)", text)
-    if match:
-        return match.group(1).strip() or None
+    for pattern in (r"编号[:：]\s*([^；;\r\n]+)", r"standard_no\s*=\s*([^；;\s]+)"):
+        match = re.search(pattern, text, flags=re.I)
+        if match:
+            return match.group(1).strip() or None
     return None
 
 
@@ -104,8 +106,8 @@ def create_alert(
         alert_type=alert_type,
         alert_level=level,
         message=message,
-        status=models.AlertStatus.pending.value,
     )
+    mark_alert_auto_handled(alert)
     db.add(alert)
     db.flush()
     return alert

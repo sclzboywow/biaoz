@@ -151,6 +151,8 @@ class ProjectDocumentOut(ProjectDocumentCreate, OrmModel):
 class DocumentVersionOut(OrmModel):
     id: int
     document_id: int
+    document_title: str | None = None
+    standard_no: str | None = None
     url_source_id: int | None = None
     version_no: str | None = None
     file_name: str
@@ -162,6 +164,13 @@ class DocumentVersionOut(OrmModel):
     change_type: str
     is_current: bool
     remark: str | None = None
+
+
+class DocumentVersionPage(BaseModel):
+    total: int
+    items: list[DocumentVersionOut]
+    next_cursor: int | None = None
+    has_more: bool = False
 
 
 class AlertCreate(BaseModel):
@@ -414,6 +423,20 @@ class StandardResourcePage(BaseModel):
     has_more: bool = False
 
 
+class StandardDetailOut(OrmModel):
+    id: int
+    standard_resource_id: int
+    catalog_text: str | None = None
+    mandatory_provisions: str | None = None
+    expert_interpretation: str | None = None
+    product_info: str | None = None
+    change_info: str | None = None
+    related_books: str | None = None
+    raw_html_path: str | None = None
+    raw_text_path: str | None = None
+    captured_at: datetime
+
+
 class StandardFileMatchOut(OrmModel):
     id: int
     standard_resource_id: int
@@ -437,7 +460,10 @@ class StandardChangeLogOut(OrmModel):
     id: int
     standard_resource_id: int
     document_id: int | None = None
+    document_title: str | None = None
     document_version_id: int | None = None
+    version_no: str | None = None
+    file_name: str | None = None
     field_name: str
     old_value: str | None = None
     new_value: str | None = None
@@ -517,6 +543,7 @@ class MatchRunResult(BaseModel):
 
 class ResourceChainOut(BaseModel):
     resource: StandardResourceOut
+    details: list[StandardDetailOut]
     matches: list[StandardFileMatchOut]
     documents: list[DocumentOut]
     versions: list[DocumentVersionOut]

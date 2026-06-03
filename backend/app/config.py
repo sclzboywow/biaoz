@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     url_check_interval_seconds: int = 3600
     url_check_on_startup: bool = False
+    collection_task_inline_worker: bool = True
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

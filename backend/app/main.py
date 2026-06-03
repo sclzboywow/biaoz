@@ -1,4 +1,5 @@
 import asyncio
+import mimetypes
 import string
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
@@ -6,16 +7,26 @@ from pathlib import Path
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from sqlalchemy import desc, func, or_, select
 from sqlalchemy.orm import Session
 
 from app import crud, models, schemas
+from app.alerts import auto_handle_pending_alerts
+from app.collection_tasks import normalize_collection_batch_size, run_url_check_task, stream_url_source_ids
 from app.config import get_settings
 from app.database import SessionLocal, get_db
 from app.guobiao_discovery import sync_discovered_sublibs
 from app.guobiao_sync import sync_guobiao_resources  # noqa: F401  # imports and registers guobiao adapter
+from app.samr_std_sync import sync_samr_std_resources  # noqa: F401  # imports and registers samr adapter
 from app.scheduler import run_url_check_loop
-from app.settings_store import ensure_default_settings, ensure_default_trusted_sources, get_bool_setting, get_int_setting
+from app.settings_store import (
+    ensure_default_settings,
+    ensure_default_trusted_sources,
+    get_bool_setting,
+    get_int_setting,
+    get_setting,
+)
 from app.standard_number import normalize_standard_no
 from app.status_calibration import calibrate_resource_status
 from app.trusted_source_adapters import TrustedSourceSyncOptions, registry
@@ -39,7 +50,8 @@ async def startup() -> None:
     with SessionLocal() as db:
         ensure_default_settings(db)
         ensure_default_trusted_sources(db)
-        configured_storage_root(db, settings.storage_root).mkdir(parents=True, exist_ok=True)
+        auto_handle_pending_alerts(db)
+        check_storage_root(db, settings.storage_root)
     app.state.url_check_task = asyncio.create_task(
         run_url_check_loop(
             settings.url_check_interval_seconds,
@@ -104,20 +116,6 @@ def cursor_window(db: Session, statement, id_column, page_size: int, cursor: int
     items = rows[:limit]
     next_cursor = items[-1].id if has_more and items else None
     return items, next_cursor, has_more
-
-
-def stream_url_source_ids(db: Session, include_manual: bool, batch_size: int, start_after_id: int = 0):
-    last_id = start_after_id
-    size = min(max(batch_size, 1), 500)
-    while True:
-        statement = select(models.UrlSource.id).where(models.UrlSource.id > last_id)
-        if not include_manual:
-            statement = statement.where(models.UrlSource.check_frequency != "manual")
-        ids = list(db.scalars(statement.order_by(models.UrlSource.id).limit(size)))
-        if not ids:
-            break
-        yield ids
-        last_id = ids[-1]
 
 
 @api.get("/url-sources", response_model=list[schemas.UrlSourceOut])
@@ -203,58 +201,6 @@ def check_all_url_sources(include_manual: bool = False, db: Session = Depends(ge
     return schemas.CheckAllResult(total=total, results=results)
 
 
-def run_url_check_task(task_id: int, include_manual: bool, batch_size: int) -> None:
-    with SessionLocal() as db:
-        task = db.get(models.CollectionTask, task_id)
-        if task is None:
-            return
-        task.status = "running"
-        task.started_at = task.started_at or datetime.now(UTC)
-        task.include_manual = include_manual
-        task.batch_size = batch_size
-        task.worker_id = f"fastapi-background-{task_id}"
-        task.heartbeat_at = datetime.now(UTC)
-        timeout_seconds = get_int_setting(db, "download_timeout_seconds", 30)
-        count_statement = select(func.count(models.UrlSource.id))
-        if not include_manual:
-            count_statement = count_statement.where(models.UrlSource.check_frequency != "manual")
-        task.total = db.scalar(count_statement) or 0
-        db.commit()
-
-        try:
-            for source_ids in stream_url_source_ids(db, include_manual, batch_size, task.last_source_id or 0):
-                for source_id in source_ids:
-                    source = db.get(models.UrlSource, source_id)
-                    if source is None:
-                        continue
-                    result = check_url_source(db, source, settings.storage_root, timeout_seconds)
-                    task = db.get(models.CollectionTask, task_id)
-                    if task is None:
-                        return
-                    task.processed += 1
-                    if result.ok:
-                        task.success += 1
-                    else:
-                        task.failed += 1
-                    task.last_source_id = source_id
-                    task.heartbeat_at = datetime.now(UTC)
-                    task.updated_at = datetime.now(UTC)
-                    db.commit()
-            task = db.get(models.CollectionTask, task_id)
-            if task:
-                task.status = "finished"
-                task.finished_at = datetime.now(UTC)
-                task.message = "批量 URL 检查完成"
-                db.commit()
-        except Exception as exc:  # pragma: no cover - background task safety net
-            task = db.get(models.CollectionTask, task_id)
-            if task:
-                task.status = "failed"
-                task.finished_at = datetime.now(UTC)
-                task.message = str(exc)
-                db.commit()
-
-
 @api.post("/collection-tasks/url-check", response_model=schemas.CollectionTaskOut)
 def create_url_check_task(
     payload: schemas.CollectionTaskCreate,
@@ -265,12 +211,19 @@ def create_url_check_task(
         task_type="url_check",
         status="pending",
         include_manual=payload.include_manual,
-        batch_size=min(max(payload.batch_size, 1), 500),
+        batch_size=normalize_collection_batch_size(payload.batch_size),
     )
     db.add(task)
     db.commit()
     db.refresh(task)
-    background_tasks.add_task(run_url_check_task, task.id, payload.include_manual, min(max(payload.batch_size, 1), 500))
+    if settings.collection_task_inline_worker:
+        background_tasks.add_task(
+            run_url_check_task,
+            task.id,
+            payload.include_manual,
+            normalize_collection_batch_size(payload.batch_size),
+            f"fastapi-background-{task.id}",
+        )
     return task
 
 
@@ -285,7 +238,14 @@ def resume_collection_task(task_id: int, background_tasks: BackgroundTasks, db: 
     task.message = "已请求恢复执行"
     db.commit()
     db.refresh(task)
-    background_tasks.add_task(run_url_check_task, task.id, bool(task.include_manual), min(max(task.batch_size or 50, 1), 500))
+    if settings.collection_task_inline_worker:
+        background_tasks.add_task(
+            run_url_check_task,
+            task.id,
+            bool(task.include_manual),
+            normalize_collection_batch_size(task.batch_size),
+            f"fastapi-background-{task.id}",
+        )
     return task
 
 
@@ -456,6 +416,106 @@ def list_document_versions(document_id: int, db: Session = Depends(get_db)):
             .where(models.DocumentVersion.document_id == document_id)
             .order_by(desc(models.DocumentVersion.downloaded_at))
         )
+    )
+
+
+@api.get("/document-versions/page", response_model=schemas.DocumentVersionPage)
+def page_document_versions(
+    page_size: int = 50,
+    cursor: int | None = None,
+    document_id: int | None = None,
+    is_current: bool | None = None,
+    db: Session = Depends(get_db),
+):
+    page_size = min(max(page_size, 1), 200)
+    statement = select(models.DocumentVersion)
+    count_statement = select(func.count(models.DocumentVersion.id))
+    if document_id:
+        statement = statement.where(models.DocumentVersion.document_id == document_id)
+        count_statement = count_statement.where(models.DocumentVersion.document_id == document_id)
+    if is_current is not None:
+        statement = statement.where(models.DocumentVersion.is_current.is_(is_current))
+        count_statement = count_statement.where(models.DocumentVersion.is_current.is_(is_current))
+    total = db.scalar(count_statement) or 0
+    items, next_cursor, has_more = cursor_window(db, statement, models.DocumentVersion.id, page_size, cursor)
+    document_ids = [item.document_id for item in items]
+    documents = (
+        {
+            document.id: document
+            for document in db.scalars(select(models.Document).where(models.Document.id.in_(document_ids)))
+        }
+        if document_ids
+        else {}
+    )
+    version_items = []
+    for item in items:
+        document = documents.get(item.document_id)
+        version_items.append(
+            schemas.DocumentVersionOut.model_validate(item).model_copy(
+                update={
+                    "document_title": document.title if document else None,
+                    "standard_no": document.standard_no if document else None,
+                }
+            )
+        )
+    return schemas.DocumentVersionPage(total=total, items=version_items, next_cursor=next_cursor, has_more=has_more)
+
+
+def resolve_document_version_file(db: Session, version: models.DocumentVersion) -> Path:
+    storage_root = configured_storage_root(db, settings.storage_root).resolve()
+    raw_path = Path(version.file_path)
+    if raw_path.is_absolute():
+        resolved = raw_path.resolve()
+        try:
+            resolved.relative_to(storage_root)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="File path is outside the configured storage root.") from exc
+        if resolved.exists() and resolved.is_file():
+            return resolved
+        raise HTTPException(status_code=404, detail="Archived file does not exist.")
+
+    roots = [storage_root]
+    fallback_roots = get_setting(db, "storage_fallback_roots", "") or ""
+    for item in fallback_roots.split(";"):
+        item = item.strip()
+        if item:
+            roots.append(Path(item).expanduser().resolve())
+
+    for root in roots:
+        resolved = (root / raw_path).resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            continue
+        if resolved.exists() and resolved.is_file():
+            return resolved
+    raise HTTPException(status_code=404, detail="Archived file does not exist.")
+
+
+def change_log_out(db: Session, log: models.StandardChangeLog) -> schemas.StandardChangeLogOut:
+    document = db.get(models.Document, log.document_id) if log.document_id else None
+    version = db.get(models.DocumentVersion, log.document_version_id) if log.document_version_id else None
+    return schemas.StandardChangeLogOut.model_validate(log).model_copy(
+        update={
+            "document_title": document.title if document else None,
+            "version_no": version.version_no if version else None,
+            "file_name": version.file_name if version else None,
+        }
+    )
+
+
+@api.get("/document-versions/{version_id}/file")
+def get_document_version_file(version_id: int, inline: bool = True, db: Session = Depends(get_db)):
+    version = db.get(models.DocumentVersion, version_id)
+    if version is None:
+        raise HTTPException(status_code=404, detail="Document version does not exist.")
+    file_path = resolve_document_version_file(db, version)
+    media_type, _encoding = mimetypes.guess_type(version.file_name or file_path.name)
+    return FileResponse(
+        file_path,
+        media_type=media_type or "application/octet-stream",
+        filename=version.file_name or file_path.name,
+        content_disposition_type="inline" if inline else "attachment",
     )
 
 
@@ -685,6 +745,7 @@ def page_standard_resources(
     page_size: int = 50,
     cursor: int | None = None,
     source_id: int | None = None,
+    source_category_id: str | None = None,
     q: str | None = None,
     source_status: str | None = None,
     resource_type: str | None = None,
@@ -707,6 +768,17 @@ def page_standard_resources(
         )
     if source_id:
         filters.append(models.StandardResource.source_id == source_id)
+    if source_category_id:
+        category_statement = select(models.SourceCategory).where(
+            models.SourceCategory.source_category_id == source_category_id
+        )
+        if source_id:
+            category_statement = category_statement.where(models.SourceCategory.source_id == source_id)
+        category = db.scalars(category_statement.order_by(models.SourceCategory.id)).first()
+        if category and category.category_path:
+            filters.append(models.StandardResource.source_category_path == category.category_path)
+        else:
+            filters.append(models.StandardResource.source_category_path == source_category_id)
     if source_status:
         filters.append(models.StandardResource.source_status == source_status)
     if resource_type:
@@ -739,7 +811,15 @@ def page_standard_file_matches(
 
 @api.get("/standard-change-logs", response_model=list[schemas.StandardChangeLogOut])
 def list_standard_change_logs(limit: int = 100, db: Session = Depends(get_db)):
-    return list(db.scalars(select(models.StandardChangeLog).order_by(desc(models.StandardChangeLog.id)).limit(limit)))
+    logs = list(
+        db.scalars(
+            select(models.StandardChangeLog)
+            .where(models.StandardChangeLog.field_name != "detail_hash")
+            .order_by(desc(models.StandardChangeLog.id))
+            .limit(limit)
+        )
+    )
+    return [change_log_out(db, item) for item in logs]
 
 
 @api.get("/standard-change-logs/page", response_model=schemas.StandardChangeLogPage)
@@ -749,10 +829,17 @@ def page_standard_change_logs(
     db: Session = Depends(get_db),
 ):
     page_size = min(max(page_size, 1), 200)
-    statement = select(models.StandardChangeLog)
-    total = db.scalar(select(func.count(models.StandardChangeLog.id))) or 0
+    statement = select(models.StandardChangeLog).where(models.StandardChangeLog.field_name != "detail_hash")
+    total = db.scalar(
+        select(func.count(models.StandardChangeLog.id)).where(models.StandardChangeLog.field_name != "detail_hash")
+    ) or 0
     items, next_cursor, has_more = cursor_window(db, statement, models.StandardChangeLog.id, page_size, cursor)
-    return schemas.StandardChangeLogPage(total=total, items=items, next_cursor=next_cursor, has_more=has_more)
+    return schemas.StandardChangeLogPage(
+        total=total,
+        items=[change_log_out(db, item) for item in items],
+        next_cursor=next_cursor,
+        has_more=has_more,
+    )
 
 
 @api.get("/source-status-sync-logs", response_model=list[schemas.SourceStatusSyncLogOut])
@@ -853,6 +940,13 @@ def get_standard_resource_chain(resource_id: int, db: Session = Depends(get_db))
     resource = db.get(models.StandardResource, resource_id)
     if resource is None:
         raise HTTPException(status_code=404, detail="可信源资源不存在")
+    details = list(
+        db.scalars(
+            select(models.StandardDetail)
+            .where(models.StandardDetail.standard_resource_id == resource_id)
+            .order_by(desc(models.StandardDetail.captured_at))
+        )
+    )
     matches = list(
         db.scalars(
             select(models.StandardFileMatch)
@@ -873,6 +967,7 @@ def get_standard_resource_chain(resource_id: int, db: Session = Depends(get_db))
         db.scalars(
             select(models.StandardChangeLog)
             .where(models.StandardChangeLog.standard_resource_id == resource_id)
+            .where(models.StandardChangeLog.field_name != "detail_hash")
             .order_by(desc(models.StandardChangeLog.detected_at))
         )
     )
@@ -913,11 +1008,12 @@ def get_standard_resource_chain(resource_id: int, db: Session = Depends(get_db))
     alerts = list(db.scalars(select(models.Alert).where(models.Alert.document_id.in_(document_ids)))) if document_ids else []
     return schemas.ResourceChainOut(
         resource=resource,
+        details=details,
         matches=matches,
         documents=documents,
         versions=versions,
         url_sources=url_sources,
-        change_logs=change_logs,
+        change_logs=[change_log_out(db, item) for item in change_logs],
         sync_logs=sync_logs,
         evidences=evidences,
         relations=relations,
@@ -963,6 +1059,7 @@ def get_document_chain(document_id: int, db: Session = Depends(get_db)):
         db.scalars(
             select(models.StandardChangeLog)
             .where(models.StandardChangeLog.document_id == document_id)
+            .where(models.StandardChangeLog.field_name != "detail_hash")
             .order_by(desc(models.StandardChangeLog.detected_at))
         )
     )
@@ -1015,7 +1112,7 @@ def get_document_chain(document_id: int, db: Session = Depends(get_db)):
         matches=matches,
         resources=resources,
         url_sources=url_sources,
-        change_logs=change_logs,
+        change_logs=[change_log_out(db, item) for item in change_logs],
         sync_logs=sync_logs,
         evidences=evidences,
         relations=relations,

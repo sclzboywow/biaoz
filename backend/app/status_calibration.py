@@ -6,6 +6,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app import models
+from app.alerts import mark_alert_auto_handled
 from app.standard_number import normalize_standard_no
 
 
@@ -17,6 +18,16 @@ SOURCE_STATUS_TO_DOCUMENT_STATUS = {
     "未知": "待复核",
     "鐜拌": "来源确认现行",
     "搴熸": "来源确认废止",
+}
+
+CHANGE_FIELD_LABELS = {
+    "standard_no": "标准编号",
+    "standard_name": "标准名称",
+    "source_status": "可信源状态",
+    "publish_date": "发布日期",
+    "effective_date": "实施日期",
+    "abolish_date": "废止日期",
+    "change_info": "变更信息",
 }
 
 
@@ -156,16 +167,17 @@ def calibrate_resource_status(db: Session, resource: models.StandardResource) ->
 
         if is_conflict or suggested_status in {"来源确认废止", "疑似被替代"}:
             db.add(
-                models.Alert(
-                    document_id=document.id,
-                    url_source_id=None,
-                    alert_type="可信源状态冲突" if is_conflict else "可信源废止提醒",
-                    alert_level=models.AlertLevel.high.value,
-                    message=(
-                        f"{document.title}：本地状态 {old_status}，可信源状态 {source_status}。"
-                        f"证据：{resource.detail_url or ''}"
-                    ),
-                    status=models.AlertStatus.pending.value,
+                mark_alert_auto_handled(
+                    models.Alert(
+                        document_id=document.id,
+                        url_source_id=None,
+                        alert_type="可信源状态冲突" if is_conflict else "可信源废止提醒",
+                        alert_level=models.AlertLevel.high.value,
+                        message=(
+                            f"{document.title}：本地状态 {old_status}，可信源状态 {source_status}。"
+                            f"证据：{resource.detail_url or ''}"
+                        ),
+                    )
                 )
             )
             created_alerts += 1
@@ -186,20 +198,25 @@ def attach_change_logs_to_documents(db: Session, resource: models.StandardResour
     if not matches:
         return 0
 
-    logs = list(
-        db.scalars(
-            select(models.StandardChangeLog).where(
-                models.StandardChangeLog.standard_resource_id == resource.id,
-                models.StandardChangeLog.document_id.is_(None),
-            )
-        )
-    )
+    logs = list(db.scalars(select(models.StandardChangeLog).where(models.StandardChangeLog.standard_resource_id == resource.id)))
     updated = 0
+    match = matches[0]
     for log in logs:
-        for match in matches:
+        changed = False
+        if log.document_id != match.document_id:
             log.document_id = match.document_id
+            changed = True
+        if log.document_version_id != match.document_version_id:
             log.document_version_id = match.document_version_id
-            log.evidence_summary = f"可信源字段 {log.field_name} 变化，详情页：{log.source_url or resource.detail_url or ''}"
+            changed = True
+        field_label = CHANGE_FIELD_LABELS.get(log.field_name, log.field_name)
+        summary = f"可信源{field_label}发生变化，已关联本地文件版本 {match.document_version_id or '-'}"
+        if log.evidence_summary != summary:
+            log.evidence_summary = summary
+            changed = True
+        if log.handled_status != "已处理":
+            log.handled_status = "已处理"
+            changed = True
+        if changed:
             updated += 1
-            break
     return updated

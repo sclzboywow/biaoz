@@ -28,7 +28,7 @@ DASH_TRANSLATION = str.maketrans(
 )
 
 PREFIX_PATTERN = re.compile(
-    r"^(GB/T|GB|JGJ/T|JGJ|CJJ/T|CJJ|CECS|DB\d{0,2}/T|DB\d{0,2}|T/[A-Z0-9]+|[A-Z]{2,8}/T|[A-Z]{2,8})"
+    r"^(GB/T|GB/Z|GB|JGJ/T|JGJ|CJJ/T|CJJ|CECS|DB\d{0,2}/T|DB\d{0,2}|T/[A-Z0-9]+|[A-Z]{2,8}/T|[A-Z]{2,8})"
 )
 
 
@@ -47,6 +47,9 @@ def normalize_standard_no(value: str | None) -> StandardNumberParts:
     if not raw:
         return StandardNumberParts(raw, None, None, None, None, None)
 
+    raw = re.sub(r"[\u200b-\u200f\ufeff\x00-\x1f\x7f-\x9f]", "", raw)
+    raw = re.sub(r"^\?+(?=[\u4e00-\u9fff])", "", raw)
+    raw = re.sub(r"\?+(?=号)", "", raw)
     without_note, revision_note = _extract_revision_note(raw)
     compact = without_note.upper().translate(DASH_TRANSLATION)
     compact = re.sub(r"\s+", "", compact)

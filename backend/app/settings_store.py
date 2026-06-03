@@ -54,6 +54,12 @@ DEFAULT_SETTINGS: dict[str, dict[str, str]] = {
         "label": "存储不可用时暂停下载",
         "description": "开启后，移动盘未挂载或不可写时不下载文件，只记录检查日志并生成提醒。",
     },
+    "storage_fallback_roots": {
+        "value": "",
+        "value_type": "string",
+        "label": "存储兜底目录",
+        "description": "主存储目录找不到归档文件时，按分号分隔的目录顺序尝试旧归档根目录，用于从移动盘过渡到本机存储。",
+    },
     "wechat_webhook_url": {
         "value": "",
         "value_type": "secret",
@@ -81,35 +87,51 @@ def ensure_default_settings(db: Session) -> None:
 
 
 def ensure_default_trusted_sources(db: Session) -> None:
-    existing = db.query(TrustedSource).filter(TrustedSource.source_name == "国标电子书库").first()
-    if existing:
-        changed = False
-        if not existing.adapter_key:
-            existing.adapter_key = "guobiao_ebook"
+    defaults = [
+        {
+            "source_name": "国标电子书库",
+            "base_url": "https://ebook.chinabuilding.com.cn",
+            "trust_level": "A",
+            "trust_score": 100,
+            "source_type": "标准规范可信目录源",
+            "adapter_key": "guobiao_ebook",
+            "capabilities": "list,detail,status,category,change",
+            "is_status_authority": True,
+            "crawl_mode": "目录页 + 详情页",
+            "crawl_frequency": "weekly",
+            "enabled": True,
+            "remark": "V2.0 高可信标准状态源，优先采集公开元数据、状态、分类、目录和变更信息。",
+        },
+        {
+            "source_name": "全国标准信息公共服务平台",
+            "base_url": "https://std.samr.gov.cn",
+            "trust_level": "A",
+            "trust_score": 100,
+            "source_type": "国家标准权威信息源",
+            "adapter_key": "samr_std_public",
+            "capabilities": "list,detail,status,category,online,download,change",
+            "is_status_authority": True,
+            "crawl_mode": "公开检索接口 + 详情接口 + 官方全文阅览入口",
+            "crawl_frequency": "weekly",
+            "enabled": True,
+            "remark": "国家市场监督管理总局全国标准信息公共服务平台，采集国家标准元数据、状态、详情和官方全文在线阅览入口。",
+        },
+    ]
+    changed = False
+    for data in defaults:
+        existing = db.query(TrustedSource).filter(TrustedSource.source_name == data["source_name"]).first()
+        if existing is None:
+            db.add(TrustedSource(**data))
             changed = True
-        if not existing.capabilities:
-            existing.capabilities = "list,detail,status,category,change"
-            changed = True
-        if changed:
-            db.commit()
-        return
-    db.add(
-        TrustedSource(
-            source_name="国标电子书库",
-            base_url="https://ebook.chinabuilding.com.cn",
-            trust_level="A",
-            trust_score=100,
-            source_type="标准规范可信目录源",
-            adapter_key="guobiao_ebook",
-            capabilities="list,detail,status,category,change",
-            is_status_authority=True,
-            crawl_mode="目录页 + 详情页",
-            crawl_frequency="weekly",
-            enabled=True,
-            remark="V2.0 高可信标准状态源，优先采集公开元数据、状态、分类、目录和变更信息。",
-        )
-    )
-    db.commit()
+            continue
+        for field_name, value in data.items():
+            if field_name in {"source_name", "enabled"}:
+                continue
+            if not getattr(existing, field_name):
+                setattr(existing, field_name, value)
+                changed = True
+    if changed:
+        db.commit()
 
 
 def get_setting(db: Session, key: str, default: str | None = None) -> str | None:
