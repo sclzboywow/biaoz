@@ -1481,11 +1481,14 @@ async function submitResourceDownload() {
 async function loadTrustedSources() {
   const res = await api.get<TrustedSource[]>('/trusted-sources')
   trustedSources.value = res.data
-  if (!selectedTrustedSourceId.value && res.data.length) {
-    selectedTrustedSourceId.value = res.data[0].id
+  if (!res.data.some((item) => item.id === selectedTrustedSourceId.value)) {
+    selectedTrustedSourceId.value = res.data[0]?.id
   }
   if (selectedTrustedSourceId.value) {
     await loadSourceCategories()
+  } else {
+    sourceCategories.value = []
+    selectedSourceCategoryId.value = undefined
   }
 }
 

@@ -722,9 +722,12 @@ def browse_storage_directories(path: str | None = None):
 
 
 @api.get("/trusted-sources", response_model=list[schemas.TrustedSourceOut])
-def list_trusted_sources(db: Session = Depends(get_db)):
+def list_trusted_sources(include_disabled: bool = False, db: Session = Depends(get_db)):
     ensure_default_trusted_sources(db)
-    return list(db.scalars(select(models.TrustedSource).order_by(models.TrustedSource.id)))
+    statement = select(models.TrustedSource).order_by(models.TrustedSource.id)
+    if not include_disabled:
+        statement = statement.where(models.TrustedSource.enabled.is_(True))
+    return list(db.scalars(statement))
 
 
 @api.get("/trusted-sources/{source_id}/categories", response_model=list[schemas.SourceCategoryOut])
