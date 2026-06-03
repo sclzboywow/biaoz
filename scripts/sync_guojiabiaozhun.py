@@ -45,10 +45,16 @@ CATEGORY_ID = "gb_all"
 CATEGORY_NAME = "国家标准（全量）"
 CATEGORY_PATH = "国家标准信息公共服务平台（全量） / 国家标准"
 SOURCE_URL = f"{BASE_URL}/gb"
-PAGE_SIZE = int(os.getenv("GUOJIA_PAGE_SIZE", "50"))
-REQUEST_DELAY_SECONDS = float(os.getenv("GUOJIA_REQUEST_DELAY_SECONDS", "5"))
+PAGE_SIZE = int(os.getenv("GUOJIA_PAGE_SIZE", "200"))
+LEGACY_CURSOR_PAGE_SIZE = int(os.getenv("GUOJIA_LEGACY_CURSOR_PAGE_SIZE", "50"))
+REQUEST_DELAY_SECONDS = float(os.getenv("GUOJIA_REQUEST_DELAY_SECONDS", "1"))
 RATE_LIMIT_COOLDOWN_SECONDS = int(os.getenv("GUOJIA_RATE_LIMIT_COOLDOWN_SECONDS", "1800"))
+STALE_SYNC_SECONDS = int(os.getenv("GUOJIA_STALE_SYNC_SECONDS", "600"))
+TRANSIENT_RETRY_ATTEMPTS = int(os.getenv("GUOJIA_TRANSIENT_RETRY_ATTEMPTS", "2"))
+TRANSIENT_RETRY_DELAY_SECONDS = float(os.getenv("GUOJIA_TRANSIENT_RETRY_DELAY_SECONDS", "8"))
 PID_FILE = ROOT / "logs" / "guojiabiaozhun-sync.pid"
+RATE_LIMIT_TOKENS = ("访问过于频繁", "401", "Unauthorized", "Too Many Requests", "429")
+CURSOR_PREFIX = "cursor:"
 
 
 def _now() -> str:
@@ -62,6 +68,51 @@ def _log(message: str) -> None:
 def _delay() -> None:
     if REQUEST_DELAY_SECONDS > 0:
         time.sleep(REQUEST_DELAY_SECONDS)
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _is_rate_limited_status(exc: httpx.HTTPStatusError) -> bool:
+    status_code = exc.response.status_code
+    return status_code in {401, 429} or _is_access_limited(exc)
+
+
+def _is_transient_status(exc: httpx.HTTPStatusError) -> bool:
+    return exc.response.status_code in {502, 503, 504}
+
+
+def _retry_delay(attempt: int) -> None:
+    delay = TRANSIENT_RETRY_DELAY_SECONDS * max(1, attempt)
+    if delay > 0:
+        time.sleep(delay)
+
+
+def _cursor_state(category: models.SourceCategory) -> tuple[int, int]:
+    raw = category.last_seen_book_ids_hash or ""
+    if raw.startswith(CURSOR_PREFIX):
+        values: dict[str, int] = {}
+        for part in raw[len(CURSOR_PREFIX) :].split(";"):
+            if "=" not in part:
+                continue
+            key, value = part.split("=", 1)
+            try:
+                values[key] = int(value)
+            except ValueError:
+                pass
+        page_size = max(1, values.get("page_size") or PAGE_SIZE)
+        completed_items = max(0, values.get("completed_items") or ((category.last_synced_page or 0) * page_size))
+        return page_size, completed_items
+    return LEGACY_CURSOR_PAGE_SIZE, max(0, (category.last_synced_page or 0) * LEGACY_CURSOR_PAGE_SIZE)
+
+
+def _write_cursor(category: models.SourceCategory, completed_items: int) -> None:
+    category.last_seen_book_ids_hash = f"{CURSOR_PREFIX}page_size={PAGE_SIZE};completed_items={max(0, completed_items)}"
 
 
 def _client(timeout_seconds: int = 30) -> httpx.Client:
@@ -200,6 +251,69 @@ def fetch_detail(client: httpx.Client, item_id: str) -> tuple[dict[str, Any], di
         return {}, payload
     gb = data.get("gb")
     return gb if isinstance(gb, dict) else {}, payload
+
+
+def fetch_list_page(client: httpx.Client, page_number: int) -> dict[str, Any]:
+    for attempt in range(1, TRANSIENT_RETRY_ATTEMPTS + 2):
+        try:
+            response = client.get(
+                f"{BASE_URL}/gb/search/gbQueryPage",
+                params={
+                    "searchText": "",
+                    "ics": "",
+                    "state": "",
+                    "ISSUE_DATE": "",
+                    "sortOrder": "asc",
+                    "pageSize": str(PAGE_SIZE),
+                    "pageNumber": str(page_number),
+                    "_": str(int(time.time() * 1000)),
+                },
+                headers={"Referer": f"{BASE_URL}/gb"},
+            )
+            response.raise_for_status()
+            content_type = response.headers.get("content-type", "")
+            if "json" not in content_type.lower():
+                raise RuntimeError(f"List API returned non-JSON: {content_type} {response.text[:120]}")
+            return response.json()
+        except httpx.HTTPStatusError as exc:
+            if _is_rate_limited_status(exc) or not _is_transient_status(exc) or attempt > TRANSIENT_RETRY_ATTEMPTS:
+                raise
+            _log(f"list page {page_number} transient {_http_error_message(exc)!r}; retry {attempt}/{TRANSIENT_RETRY_ATTEMPTS}")
+            _retry_delay(attempt)
+        except (httpx.TransportError, httpx.TimeoutException) as exc:
+            if attempt > TRANSIENT_RETRY_ATTEMPTS:
+                raise
+            _log(f"list page {page_number} transient {exc!r}; retry {attempt}/{TRANSIENT_RETRY_ATTEMPTS}")
+            _retry_delay(attempt)
+    raise RuntimeError(f"List API retry failed: page={page_number}")
+
+
+def fetch_detail(client: httpx.Client, item_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    for attempt in range(1, TRANSIENT_RETRY_ATTEMPTS + 2):
+        try:
+            response = client.get(
+                f"{BASE_URL}/gb/search/gbDetailInfo",
+                params={"id": item_id},
+                headers={"Referer": _detail_url(item_id)},
+            )
+            response.raise_for_status()
+            payload = response.json()
+            data = payload.get("data") if isinstance(payload, dict) else None
+            if not isinstance(data, dict):
+                return {}, payload
+            gb = data.get("gb")
+            return gb if isinstance(gb, dict) else {}, payload
+        except httpx.HTTPStatusError as exc:
+            if _is_rate_limited_status(exc) or not _is_transient_status(exc) or attempt > TRANSIENT_RETRY_ATTEMPTS:
+                raise
+            _log(f"detail {item_id} transient {_http_error_message(exc)!r}; retry {attempt}/{TRANSIENT_RETRY_ATTEMPTS}")
+            _retry_delay(attempt)
+        except (httpx.TransportError, httpx.TimeoutException) as exc:
+            if attempt > TRANSIENT_RETRY_ATTEMPTS:
+                raise
+            _log(f"detail {item_id} transient {exc!r}; retry {attempt}/{TRANSIENT_RETRY_ATTEMPTS}")
+            _retry_delay(attempt)
+    raise RuntimeError(f"Detail API retry failed: id={item_id}")
 
 
 def official_links(row: dict[str, Any], item_id: str) -> dict[str, str]:
@@ -384,13 +498,31 @@ def sync_one_page(include_files: bool) -> dict[str, Any]:
     }
     with SessionLocal() as db:
         source, category = ensure_source_and_category(db)
-        start_page = max(1, (category.last_synced_page or 0) + 1)
+        _cursor_page_size, completed_items = _cursor_state(category)
+        if _cursor_page_size != PAGE_SIZE:
+            completed_items = max(0, completed_items - max(_cursor_page_size, PAGE_SIZE))
+        last_started = _as_utc(category.last_sync_started_at)
+        last_finished = _as_utc(category.last_sync_finished_at)
+        if (
+            last_started
+            and (last_finished is None or last_finished < last_started)
+            and (datetime.now(UTC) - last_started).total_seconds() > STALE_SYNC_SECONDS
+        ):
+            completed_items = max(0, completed_items - _cursor_page_size)
+            category.last_synced_page = completed_items // PAGE_SIZE
+            _write_cursor(category, completed_items)
+            category.last_sync_error = "previous sync interrupted; retrying the last page"
+            db.commit()
+
+        start_page = (completed_items // PAGE_SIZE) + 1
         category.sync_status = "同步中"
         category.last_sync_started_at = datetime.now(UTC)
         category.last_sync_error = None
         db.commit()
 
         page_error: str | None = None
+        page_complete = False
+        access_limited = False
         with _client(get_int_setting(db, "download_timeout_seconds", 30)) as client:
             try:
                 page = fetch_list_page(client, start_page)
@@ -398,12 +530,11 @@ def sync_one_page(include_files: bool) -> dict[str, Any]:
                 if not isinstance(rows, list):
                     rows = []
                 category.resource_count = int(page.get("total") or 0)
-                category.last_synced_page = start_page
-                stats["pages"] = 1
             except httpx.HTTPStatusError as exc:
                 stats["errors"] += 1
                 page_error = _http_error_message(exc)
                 category.last_sync_error = page_error
+                access_limited = _is_rate_limited_status(exc)
                 rows = []
             except Exception as exc:
                 stats["errors"] += 1
@@ -432,7 +563,8 @@ def sync_one_page(include_files: bool) -> dict[str, Any]:
                     stats["errors"] += 1
                     page_error = _http_error_message(exc)
                     category.last_sync_error = page_error
-                    if _is_access_limited(exc):
+                    if _is_rate_limited_status(exc):
+                        access_limited = True
                         break
                 except Exception as exc:
                     stats["errors"] += 1
@@ -456,6 +588,13 @@ def sync_one_page(include_files: bool) -> dict[str, Any]:
                     category.last_sync_error = str(exc)
                 db.commit()
 
+            page_complete = (not access_limited) and (page_error is None or bool(rows))
+            if page_complete:
+                completed_items = max(completed_items, start_page * PAGE_SIZE)
+                category.last_synced_page = start_page
+                _write_cursor(category, completed_items)
+                stats["pages"] = 1
+
         total_pages = max(1, ((category.resource_count or 0) + PAGE_SIZE - 1) // PAGE_SIZE)
         completed = (category.last_synced_page or 0) >= total_pages
         category.last_sync_finished_at = datetime.now(UTC)
@@ -471,6 +610,12 @@ def run(args: argparse.Namespace) -> int:
     _claim_pidfile(Path(args.pid_file))
     synced_pages = 0
     try:
+        _log(
+            "guojiabiaozhun sync started "
+            f"page_size={PAGE_SIZE} request_delay={REQUEST_DELAY_SECONDS}s "
+            f"interval={args.interval_seconds}s transient_retries={TRANSIENT_RETRY_ATTEMPTS} "
+            f"cooldown={args.cooldown_seconds}s include_files={args.include_files}"
+        )
         while True:
             stats = sync_one_page(include_files=args.include_files)
             synced_pages += int(stats.get("pages") or 0)

@@ -5,8 +5,9 @@ param(
   [switch]$Once,
   [switch]$IncludeFiles,
   [int]$MaxPages = 0,
-  [int]$IntervalSeconds = 180,
-  [double]$RequestDelaySeconds = 5,
+  [int]$IntervalSeconds = 30,
+  [double]$RequestDelaySeconds = 1,
+  [int]$PageSize = 200,
   [int]$CooldownSeconds = 1800
 )
 
@@ -82,6 +83,7 @@ if ($Background) {
     "-File", $PSCommandPath,
     "-IntervalSeconds", "$IntervalSeconds",
     "-RequestDelaySeconds", "$RequestDelaySeconds",
+    "-PageSize", "$PageSize",
     "-CooldownSeconds", "$CooldownSeconds"
   )
   if ($IncludeFiles) { $psArgs += "-IncludeFiles" }
@@ -102,6 +104,7 @@ if ($Background) {
 }
 
 $env:GUOJIA_REQUEST_DELAY_SECONDS = "$RequestDelaySeconds"
+$env:GUOJIA_PAGE_SIZE = "$PageSize"
 $env:GUOJIA_RATE_LIMIT_COOLDOWN_SECONDS = "$CooldownSeconds"
 
 Push-Location $backend
