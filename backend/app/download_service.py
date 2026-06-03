@@ -72,7 +72,10 @@ def doc_type(file_name: str, content_type: str | None) -> str:
 
 def extract_standard_no(source: models.UrlSource) -> str | None:
     text = source.remark or ""
-    for pattern in (r"编号[:：]\s*([^；;\r\n]+)", r"standard_no\s*=\s*([^；;\s]+)"):
+    for pattern in (
+        r"standard_no\s*=\s*([^；;\r\n]+)",
+        r"编号[:：]\s*([^；;\r\n]+)",
+    ):
         match = re.search(pattern, text, flags=re.I)
         if match:
             return match.group(1).strip() or None
