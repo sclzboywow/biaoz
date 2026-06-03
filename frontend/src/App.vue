@@ -459,7 +459,7 @@
           </el-form-item>
           <el-form-item><el-button type="primary" :icon="Search" @click="resetStandardSearch">搜索</el-button></el-form-item>
         </el-form>
-        <el-table :data="standardSearchResources" :height="pagedTableHeight" @row-click="openResourceChain">
+        <el-table :data="standardSearchResources" :height="standardSearchTableHeight" @row-click="openResourceChain">
           <el-table-column prop="standard_no" label="标准号" width="170" />
           <el-table-column prop="standard_name" label="名称" min-width="320" show-overflow-tooltip />
           <el-table-column prop="source_status" label="官方状态" width="120" />
@@ -1073,6 +1073,7 @@ const dashboardTableHeight = 'calc(100vh - 330px)'
 const pagedTableHeight = 'calc(100vh - 260px)'
 const trustedResourceTableHeight = 'calc(100vh - 330px)'
 const collectionTableHeight = 'calc(100vh - 360px)'
+const standardSearchTableHeight = 'calc(100vh - 340px)'
 const plainTableHeight = 'calc(100vh - 170px)'
 const pageSizeOptions = [20, 50, 100, 200]
 
