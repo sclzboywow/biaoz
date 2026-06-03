@@ -661,39 +661,50 @@
       <el-descriptions :column="2" border>
         <el-descriptions-item label="标准编号">{{ resourceChain.resource.standard_no }}</el-descriptions-item>
         <el-descriptions-item label="规范编号">{{ resourceChain.resource.normalized_standard_no }}</el-descriptions-item>
-        <el-descriptions-item label="标准名称">{{ resourceChain.resource.standard_name }}</el-descriptions-item>
+        <el-descriptions-item label="标准名称" :span="2">{{ resourceChain.resource.standard_name }}</el-descriptions-item>
         <el-descriptions-item label="资源类型">{{ resourceChain.resource.resource_type }}</el-descriptions-item>
         <el-descriptions-item label="来源状态">{{ resourceChain.resource.source_status }}</el-descriptions-item>
         <el-descriptions-item label="系统判断">{{ resourceChain.resource.system_status }}</el-descriptions-item>
         <el-descriptions-item label="人工复核">{{ resourceChain.resource.manual_status || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="发布日期">{{ formatDate(resourceChain.resource.publish_date) }}</el-descriptions-item>
+        <el-descriptions-item label="实施日期">{{ formatDate(resourceChain.resource.effective_date) }}</el-descriptions-item>
         <el-descriptions-item label="废止日期">{{ formatDate(resourceChain.resource.abolish_date) }}</el-descriptions-item>
-        <el-descriptions-item label="来源详情页" :span="2">
-          <a v-if="resourceChain.resource.detail_url" :href="resourceChain.resource.detail_url" target="_blank">{{ resourceChain.resource.detail_url }}</a>
+        <el-descriptions-item label="来源详情页">
+          <el-button v-if="resourceChain.resource.detail_url" link type="primary" @click="openExternalUrl(resourceChain.resource.detail_url)">打开来源详情</el-button>
           <span v-else>-</span>
         </el-descriptions-item>
       </el-descriptions>
 
       <template v-if="resourceChain.details.length">
-        <h3 class="section-title">官方字段与链接</h3>
+        <h3 class="section-title">官方信息</h3>
         <el-descriptions :column="1" border>
-          <el-descriptions-item label="官方链接">
-            <div v-if="officialLinkEntries(resourceChain.details[0].catalog_text).length" class="link-list">
-              <p v-for="[label, url] in officialLinkEntries(resourceChain.details[0].catalog_text)" :key="label">
-                <strong>{{ label }}</strong>
-                <a :href="url" target="_blank">{{ url }}</a>
-              </p>
+          <el-descriptions-item v-for="item in officialFieldEntries(resourceChain.details[0].catalog_text)" :key="item.key" :label="item.label" :span="item.span">
+            {{ item.value || '-' }}
+          </el-descriptions-item>
+          <el-descriptions-item label="官方入口">
+            <div v-if="officialLinkEntries(resourceChain.details[0].catalog_text).length" class="official-link-actions">
+              <el-button
+                v-for="[label, url] in officialLinkEntries(resourceChain.details[0].catalog_text)"
+                :key="label"
+                size="small"
+                @click="openExternalUrl(url)"
+              >
+                {{ officialLinkLabel(label) }}
+              </el-button>
             </div>
             <span v-else>-</span>
           </el-descriptions-item>
-          <el-descriptions-item label="官方 gb 字段">
-            <el-table :data="gbFieldEntries(resourceChain.details[0].catalog_text)" max-height="260" size="small">
-              <el-table-column prop="key" label="字段" width="190" />
-              <el-table-column prop="value" label="值" min-width="360" show-overflow-tooltip />
-            </el-table>
+          <el-descriptions-item label="采集时间">
+            {{ formatDateTime(resourceChain.details[0].captured_at) }}
           </el-descriptions-item>
         </el-descriptions>
-        <el-tabs class="detail-json-tabs">
-          <el-tab-pane label="完整详情 JSON">
+        <div class="raw-detail-toggle">
+          <el-button size="small" @click="showRawResourceDetail = !showRawResourceDetail">
+            {{ showRawResourceDetail ? '收起原始官方数据' : '查看原始官方数据（排查用）' }}
+          </el-button>
+        </div>
+        <el-tabs v-if="showRawResourceDetail" class="detail-json-tabs">
+          <el-tab-pane label="详情 JSON">
             <pre class="json-block">{{ jsonPretty(resourceChain.details[0].product_info) }}</pre>
           </el-tab-pane>
           <el-tab-pane label="替代关系">
@@ -828,13 +839,70 @@ function officialLinkEntries(catalogText?: string | null): [string, string][] {
     .filter((entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1].length > 0)
 }
 
-function gbFieldEntries(catalogText?: string | null) {
+function openExternalUrl(url?: string | null) {
+  if (!url) return
+  window.open(url, '_blank', 'noopener')
+}
+
+const officialLinkLabels: Record<string, string> = {
+  std_detail: '国家平台详情',
+  openstd_detail: '公开标准详情',
+  online_preview: '在线预览',
+  download_page: '下载入口',
+  feedback: '意见反馈',
+}
+
+function officialLinkLabel(key: string) {
+  return officialLinkLabels[key] || key
+}
+
+const officialFieldLabels: Record<string, string> = {
+  C_STD_CODE: '标准编号',
+  C_C_NAME: '标准名称',
+  C_EN_NAME: '英文名称',
+  STD_NATURE: '标准性质',
+  STATE: '官方状态',
+  ISSUE_DATE: '发布日期',
+  ACT_DATE: '实施日期',
+  ABOLISH_DATE: '废止日期',
+  ICS_CODE: 'ICS 分类',
+  CCS_CODE: '中国标准分类号',
+  C_PLAN_CODE: '计划号',
+  DRAFT_UNIT: '起草单位',
+  TECH_COMMITTEE: '归口单位',
+  REPLACE_STD: '代替标准',
+  ADOPT_STD: '采用国际标准',
+  id: '官方记录 ID',
+}
+
+const officialFieldOrder = [
+  'C_EN_NAME',
+  'STD_NATURE',
+  'STATE',
+  'ISSUE_DATE',
+  'ACT_DATE',
+  'ABOLISH_DATE',
+  'ICS_CODE',
+  'CCS_CODE',
+  'C_PLAN_CODE',
+  'DRAFT_UNIT',
+  'TECH_COMMITTEE',
+  'REPLACE_STD',
+  'ADOPT_STD',
+]
+
+function officialFieldEntries(catalogText?: string | null) {
   const fields = parseJsonObject(catalogText).gb_fields
   if (!fields || typeof fields !== 'object' || Array.isArray(fields)) return []
-  return Object.entries(fields as Record<string, unknown>).map(([key, value]) => ({
-    key,
-    value: value === null || value === undefined ? '' : String(value),
-  }))
+  const record = fields as Record<string, unknown>
+  return officialFieldOrder
+    .filter((key) => record[key] !== null && record[key] !== undefined && String(record[key]).trim() !== '')
+    .map((key) => ({
+      key,
+      label: officialFieldLabels[key] || key,
+      value: String(record[key]),
+      span: 1,
+    }))
 }
 
 const changeFieldLabels: Record<string, string> = {
@@ -1036,6 +1104,7 @@ const statusSyncLogs = ref<SourceStatusSyncLog[]>([])
 const resourceChain = ref<ResourceChain | null>(null)
 const documentChain = ref<DocumentChain | null>(null)
 const chainDrawerVisible = ref(false)
+const showRawResourceDetail = ref(false)
 const chainTitle = ref('链路详情')
 const urlTotal = ref(0)
 const documentTotal = ref(0)
@@ -1325,6 +1394,7 @@ async function openResourceChainById(id?: number) {
   const res = await api.get<ResourceChain>(`/standard-resources/${id}/chain`)
   resourceChain.value = res.data
   documentChain.value = null
+  showRawResourceDetail.value = false
   chainTitle.value = `资源链路：${res.data.resource.standard_no || ''} ${res.data.resource.standard_name}`
   chainDrawerVisible.value = true
 }
@@ -1593,20 +1663,18 @@ onMounted(loadAll)
 </script>
 
 <style scoped>
-.link-list {
-  display: grid;
-  gap: 6px;
+.official-link-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
-.link-list p {
-  display: grid;
-  grid-template-columns: 160px minmax(0, 1fr);
-  gap: 12px;
-  margin: 0;
+.official-link-actions .el-button + .el-button {
+  margin-left: 0;
 }
 
-.link-list a {
-  overflow-wrap: anywhere;
+.raw-detail-toggle {
+  margin-top: 12px;
 }
 
 .detail-json-tabs {
