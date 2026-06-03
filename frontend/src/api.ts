@@ -27,6 +27,20 @@ export type UrlSource = {
   last_checked_at?: string
 }
 
+export type UrlCheckResult = {
+  source_id: number
+  url: string
+  ok: boolean
+  status_code?: number
+  result: string
+  message: string
+  document_id?: number
+  version_id?: number
+  alert_id?: number
+  file_hash?: string
+  change_type?: string
+}
+
 export type DocumentItem = {
   id: number
   title: string
@@ -189,8 +203,18 @@ export type StandardResource = {
   abolish_date?: string
   source_category_path?: string
   detail_url?: string
+  pdf_trial_url?: string
   last_synced_at?: string
   matched_document_count?: number
+}
+
+export type ResourceDownloadCaptchaChallenge = {
+  resource_id: number
+  challenge_id: string
+  captcha_image_base64: string
+  captcha_content_type: string
+  expires_at: string
+  message: string
 }
 
 export type StandardDetail = {

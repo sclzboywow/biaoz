@@ -1,10 +1,15 @@
+import base64
 import asyncio
 import mimetypes
+import re
+import secrets
 import string
-from datetime import UTC, datetime
+import time
+from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
 from pathlib import Path
 
+import httpx
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -16,9 +21,10 @@ from app.alerts import auto_handle_pending_alerts
 from app.collection_tasks import normalize_collection_batch_size, run_url_check_task, stream_url_source_ids
 from app.config import get_settings
 from app.database import SessionLocal, get_db
+from app.download_service import DownloadedContent, archive_downloaded_content
 from app.guobiao_discovery import sync_discovered_sublibs
 from app.guobiao_sync import sync_guobiao_resources  # noqa: F401  # imports and registers guobiao adapter
-from app.samr_std_sync import sync_samr_std_resources  # noqa: F401  # imports and registers samr adapter
+from app.samr_std_sync import _download_url, _online_url, sync_samr_std_resources  # noqa: F401  # imports and registers samr adapter
 from app.scheduler import run_url_check_loop
 from app.settings_store import (
     ensure_default_settings,
@@ -74,6 +80,48 @@ def health() -> dict[str, str]:
 
 
 api = FastAPI()
+
+CAPTCHA_CHALLENGE_TTL_SECONDS = 600
+GB688_BASE_URL = "http://c.gb688.cn/bzgk/gb"
+
+
+def captcha_challenges() -> dict[str, dict]:
+    store = getattr(app.state, "download_captcha_challenges", None)
+    if store is None:
+        store = {}
+        app.state.download_captcha_challenges = store
+    now = datetime.now(UTC)
+    expired = [key for key, value in store.items() if value.get("expires_at", now) < now]
+    for key in expired:
+        store.pop(key, None)
+    return store
+
+
+def extract_hcno(resource: models.StandardResource) -> str | None:
+    text = "\n".join(value for value in [resource.pdf_trial_url, resource.summary, resource.detail_url] if value)
+    match = re.search(r"hcno=([A-Za-z0-9]+)", text)
+    if match:
+        return match.group(1)
+    return None
+
+
+def create_or_get_download_url_source(db: Session, resource: models.StandardResource, url: str) -> models.UrlSource:
+    source = db.scalars(select(models.UrlSource).where(models.UrlSource.url == url)).first()
+    if source:
+        return source
+    source = models.UrlSource(
+        url=url,
+        source_name=resource.standard_name or resource.standard_no or url,
+        source_unit=resource.source_name,
+        source_type="官方标准PDF",
+        category="国家标准",
+        check_frequency="manual",
+        status=models.SourceStatus.normal.value,
+        remark=f"standard_no={resource.standard_no or ''}; standard_resource_id={resource.id}; captcha=manual",
+    )
+    db.add(source)
+    db.flush()
+    return source
 
 
 def apply_standard_number_fields(target, value: str | None) -> None:
@@ -789,6 +837,135 @@ def page_standard_resources(
     total = db.scalar(count_statement) or 0
     items, next_cursor, has_more = cursor_window(db, statement, models.StandardResource.id, page_size, cursor)
     return schemas.StandardResourcePage(total=total, items=items, next_cursor=next_cursor, has_more=has_more)
+
+
+@api.post(
+    "/standard-resources/{resource_id}/download-captcha",
+    response_model=schemas.ResourceDownloadCaptchaChallenge,
+)
+def create_resource_download_captcha(resource_id: int, db: Session = Depends(get_db)):
+    resource = db.get(models.StandardResource, resource_id)
+    if resource is None:
+        raise HTTPException(status_code=404, detail="可信源资源不存在")
+    hcno = extract_hcno(resource)
+    if not hcno:
+        raise HTTPException(status_code=400, detail="该标准暂未入库官方全文入口，无法生成验证码")
+
+    download_page_url = _download_url(hcno)
+    captcha_url = f"{GB688_BASE_URL}/gc?_{int(time.time() * 1000)}"
+    try:
+        with httpx.Client(
+            follow_redirects=True,
+            timeout=get_int_setting(db, "download_timeout_seconds", 30),
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) StandardDocsIngest/1.0",
+                "Accept-Language": "zh-CN,zh;q=0.9",
+            },
+        ) as client:
+            page = client.get(download_page_url, headers={"Accept": "text/html,*/*", "Referer": _online_url(hcno)})
+            page.raise_for_status()
+            captcha = client.get(captcha_url, headers={"Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"})
+            captcha.raise_for_status()
+            content_type = captcha.headers.get("content-type") or "image/jpeg"
+            if not content_type.lower().startswith("image/"):
+                raise HTTPException(status_code=502, detail=f"验证码接口返回异常：{content_type}")
+            challenge_id = secrets.token_urlsafe(24)
+            expires_at = datetime.now(UTC) + timedelta(seconds=CAPTCHA_CHALLENGE_TTL_SECONDS)
+            captcha_challenges()[challenge_id] = {
+                "resource_id": resource.id,
+                "hcno": hcno,
+                "cookies": dict(client.cookies),
+                "expires_at": expires_at,
+            }
+    except HTTPException:
+        raise
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"获取官方验证码失败：{exc}") from exc
+
+    return schemas.ResourceDownloadCaptchaChallenge(
+        resource_id=resource.id,
+        challenge_id=challenge_id,
+        captcha_image_base64=base64.b64encode(captcha.content).decode("ascii"),
+        captcha_content_type=content_type,
+        expires_at=expires_at,
+        message="请输入图片验证码后下载真实 PDF；验证码只用于本次官方下载会话。",
+    )
+
+
+@api.post("/standard-resources/{resource_id}/download-with-captcha", response_model=schemas.UrlCheckResult)
+def download_resource_with_captcha(
+    resource_id: int,
+    payload: schemas.ResourceDownloadCaptchaSubmit,
+    db: Session = Depends(get_db),
+):
+    resource = db.get(models.StandardResource, resource_id)
+    if resource is None:
+        raise HTTPException(status_code=404, detail="可信源资源不存在")
+    challenge = captcha_challenges().pop(payload.challenge_id, None)
+    if not challenge or challenge.get("resource_id") != resource.id:
+        raise HTTPException(status_code=400, detail="验证码会话不存在或已过期，请刷新验证码")
+    verify_code = (payload.verify_code or "").strip()
+    if not verify_code:
+        raise HTTPException(status_code=400, detail="请输入验证码")
+
+    hcno = challenge["hcno"]
+    cookies = challenge.get("cookies") or {}
+    verify_url = f"{GB688_BASE_URL}/verifyCode"
+    file_url = f"{GB688_BASE_URL}/viewGb?hcno={hcno}"
+    try:
+        with httpx.Client(
+            follow_redirects=True,
+            timeout=get_int_setting(db, "download_timeout_seconds", 30),
+            cookies=cookies,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) StandardDocsIngest/1.0",
+                "Accept-Language": "zh-CN,zh;q=0.9",
+            },
+        ) as client:
+            verify = client.post(
+                verify_url,
+                data={"verifyCode": verify_code},
+                headers={
+                    "Accept": "text/plain,*/*",
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Referer": _download_url(hcno),
+                },
+            )
+            verify.raise_for_status()
+            if verify.text.strip() != "success":
+                raise HTTPException(status_code=400, detail="验证码不正确，请重新获取验证码后重试")
+            response = client.get(
+                file_url,
+                headers={"Accept": "application/pdf,*/*", "Referer": _download_url(hcno)},
+            )
+            response.raise_for_status()
+    except HTTPException:
+        raise
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"官方文件下载失败：{exc}") from exc
+
+    content_type = response.headers.get("content-type") or ""
+    if not response.content.startswith(b"%PDF"):
+        raise HTTPException(status_code=400, detail=f"官方返回内容不是 PDF，已拒绝入库：{content_type or 'unknown'}")
+
+    url_source = create_or_get_download_url_source(db, resource, file_url)
+    result = archive_downloaded_content(
+        db,
+        url_source,
+        settings.storage_root,
+        DownloadedContent(
+            status_code=response.status_code,
+            url=str(response.url),
+            content=response.content,
+            content_type=content_type,
+            content_disposition=response.headers.get("content-disposition"),
+        ),
+    )
+    if result.ok:
+        db.refresh(resource)
+        calibrate_resource_status(db, resource)
+        db.commit()
+    return result
 
 
 @api.get("/standard-file-matches", response_model=list[schemas.StandardFileMatchOut])

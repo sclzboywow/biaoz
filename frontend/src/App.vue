@@ -15,6 +15,7 @@
         <el-menu-item index="statusSyncLogs"><el-icon><Switch /></el-icon><span>状态同步记录</span></el-menu-item>
         <el-menu-item index="sourceChanges"><el-icon><Warning /></el-icon><span>变更监测</span></el-menu-item>
         <el-menu-item index="settings"><el-icon><Setting /></el-icon><span>系统设置</span></el-menu-item>
+        <el-menu-item index="standardSearch"><el-icon><Search /></el-icon><span>标准搜索入库</span></el-menu-item>
       </el-menu>
     </el-aside>
 
@@ -428,6 +429,72 @@
         </el-tabs>
       </section>
 
+      <section v-if="activeView === 'standardSearch'" class="panel">
+        <div class="toolbar">
+          <h2>标准搜索入库</h2>
+          <el-button :icon="Refresh" @click="resetStandardSearch">刷新</el-button>
+        </div>
+        <el-alert
+          title="这里搜索的是本地已入库的官方标准元数据；真实文件下载需要人工输入官方下载页验证码。"
+          type="info"
+          :closable="false"
+          class="inline-alert"
+        />
+        <el-form :inline="true" class="filters">
+          <el-form-item label="标准">
+            <el-input
+              v-model="standardSearchQuery.q"
+              clearable
+              placeholder="标准号、名称、关键词"
+              style="width: 360px"
+              @keyup.enter="resetStandardSearch"
+            />
+          </el-form-item>
+          <el-form-item label="状态">
+            <el-select v-model="standardSearchQuery.source_status" clearable style="width: 140px">
+              <el-option label="现行" value="现行" />
+              <el-option label="即将实施" value="即将实施" />
+              <el-option label="废止" value="废止" />
+            </el-select>
+          </el-form-item>
+          <el-form-item><el-button type="primary" :icon="Search" @click="resetStandardSearch">搜索</el-button></el-form-item>
+        </el-form>
+        <el-table :data="standardSearchResources" :height="pagedTableHeight" @row-click="openResourceChain">
+          <el-table-column prop="standard_no" label="标准号" width="170" />
+          <el-table-column prop="standard_name" label="名称" min-width="320" show-overflow-tooltip />
+          <el-table-column prop="source_status" label="官方状态" width="120" />
+          <el-table-column prop="resource_type" label="类型" width="120" />
+          <el-table-column prop="publish_date" label="发布日期" width="120" :formatter="dateFormatter" />
+          <el-table-column prop="effective_date" label="实施日期" width="120" :formatter="dateFormatter" />
+          <el-table-column label="本地文件" width="100">
+            <template #default="{ row }">
+              <el-tag :type="row.matched_document_count ? 'success' : 'info'">{{ row.matched_document_count ? '有' : '无' }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="官方全文" width="110">
+            <template #default="{ row }">
+              <el-tag :type="row.pdf_trial_url ? 'success' : 'info'">{{ row.pdf_trial_url ? '有入口' : '无入口' }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="150" fixed="right">
+            <template #default="{ row }">
+              <el-button size="small" type="primary" :loading="downloadCaptchaLoadingId === row.id" @click.stop="openResourceDownload(row)">
+                下载文件
+              </el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <div class="cursor-pager">
+          <span>Total {{ standardSearchTotal }}</span>
+          <el-select v-model="standardSearchQuery.page_size" style="width: 132px" @change="resetStandardSearch">
+            <el-option v-for="size in pageSizeOptions" :key="size" :label="`${size}/page`" :value="size" />
+          </el-select>
+          <el-button :disabled="standardSearchPager.page <= 1" @click="prevCursorPage(standardSearchPager, loadStandardSearch)">上一页</el-button>
+          <span>第 {{ standardSearchPager.page }} 页</span>
+          <el-button :disabled="!standardSearchPager.hasMore" @click="nextCursorPage(standardSearchPager, loadStandardSearch)">下一页</el-button>
+        </div>
+      </section>
+
       <section v-if="activeView === 'fileMatches'" class="panel">
         <div class="toolbar">
           <h2>本地文件匹配</h2>
@@ -566,6 +633,27 @@
     <template #footer><el-button @click="showDocumentDialog = false">取消</el-button><el-button type="primary" @click="createDocument">保存</el-button></template>
   </el-dialog>
 
+  <el-dialog v-model="showResourceDownloadDialog" title="人工验证码下载真实文件" width="520px">
+    <div v-if="selectedDownloadResource" class="captcha-download">
+      <p class="captcha-title">{{ selectedDownloadResource.standard_no || '-' }} {{ selectedDownloadResource.standard_name }}</p>
+      <el-alert
+        title="验证码由官方下载页生成，仅用于本次真实 PDF 下载；非 PDF 响应不会写入文件库。"
+        type="info"
+        :closable="false"
+      />
+      <div v-if="captchaChallenge" class="captcha-row">
+        <img class="captcha-image" :src="captchaImageSrc()" alt="验证码" @click="refreshResourceCaptcha" />
+        <el-button :loading="downloadCaptchaLoadingId === selectedDownloadResource.id" @click="refreshResourceCaptcha">换一张</el-button>
+      </div>
+      <el-input v-model="captchaCode" maxlength="8" placeholder="输入验证码" @keyup.enter="submitResourceDownload" />
+    </div>
+    <template #footer>
+      <el-button @click="showResourceDownloadDialog = false">取消</el-button>
+      <el-button :loading="resourceDownloadSubmitting" @click="refreshResourceCaptcha">刷新验证码</el-button>
+      <el-button type="primary" :loading="resourceDownloadSubmitting" :disabled="!captchaChallenge || !captchaCode" @click="submitResourceDownload">下载并入库</el-button>
+    </template>
+  </el-dialog>
+
   <el-drawer v-model="chainDrawerVisible" :title="chainTitle" size="68%">
     <section v-if="resourceChain" class="chain-detail">
       <h3>可信源资源详情</h3>
@@ -688,7 +776,7 @@
 import { defineComponent, onMounted, reactive, ref } from 'vue'
 import { Aim, Bell, CircleCheck, DataBoard, Document, Download, Files, Link, Medal, Plus, Refresh, Search, Setting, Switch, Warning } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { api, type Alert, type CollectionTask, type DocumentChain, type DocumentItem, type DocumentVersion, type Page, type ResourceChain, type SourceCategory, type SourceStatusSyncLog, type StandardChangeLog, type StandardFileMatch, type StandardResource, type StorageBrowse, type StorageStatus, type SystemSetting, type TrustedSource, type UrlSource } from './api'
+import { api, type Alert, type CollectionTask, type DocumentChain, type DocumentItem, type DocumentVersion, type Page, type ResourceChain, type ResourceDownloadCaptchaChallenge, type SourceCategory, type SourceStatusSyncLog, type StandardChangeLog, type StandardFileMatch, type StandardResource, type StorageBrowse, type StorageStatus, type SystemSetting, type TrustedSource, type UrlCheckResult, type UrlSource } from './api'
 
 function formatDateTime(value?: string | null) {
   if (!value) return '-'
@@ -941,6 +1029,7 @@ const storageStatus = ref<StorageStatus | null>(null)
 const trustedSources = ref<TrustedSource[]>([])
 const sourceCategories = ref<SourceCategory[]>([])
 const trustedResources = ref<StandardResource[]>([])
+const standardSearchResources = ref<StandardResource[]>([])
 const fileMatches = ref<StandardFileMatch[]>([])
 const sourceChanges = ref<StandardChangeLog[]>([])
 const statusSyncLogs = ref<SourceStatusSyncLog[]>([])
@@ -952,6 +1041,7 @@ const urlTotal = ref(0)
 const documentTotal = ref(0)
 const alertTotal = ref(0)
 const resourceTotal = ref(0)
+const standardSearchTotal = ref(0)
 const fileMatchTotal = ref(0)
 const versionTotal = ref(0)
 const statusSyncTotal = ref(0)
@@ -961,6 +1051,7 @@ const pendingAlertCount = ref(0)
 
 const showUrlDialog = ref(false)
 const showDocumentDialog = ref(false)
+const showResourceDownloadDialog = ref(false)
 const storagePickerVisible = ref(false)
 const storageBrowse = ref<StorageBrowse>({ directories: [] })
 const checkingSourceId = ref<number | null>(null)
@@ -968,11 +1059,16 @@ const checkingAll = ref(false)
 const syncingTrustedSource = ref(false)
 const discoveringCategories = ref(false)
 const syncingPendingCategories = ref(false)
+const downloadCaptchaLoadingId = ref<number | null>(null)
+const resourceDownloadSubmitting = ref(false)
 const selectedDocumentId = ref<number | undefined>()
 const selectedTrustedSourceId = ref<number | undefined>()
 const selectedSourceCategoryId = ref<string | undefined>()
 const collectionActiveTab = ref('sources')
 const trustedResourceActiveTab = ref('resources')
+const selectedDownloadResource = ref<StandardResource | null>(null)
+const captchaChallenge = ref<ResourceDownloadCaptchaChallenge | null>(null)
+const captchaCode = ref('')
 const dashboardTableHeight = 'calc(100vh - 330px)'
 const pagedTableHeight = 'calc(100vh - 260px)'
 const trustedResourceTableHeight = 'calc(100vh - 330px)'
@@ -994,6 +1090,7 @@ const documentQuery = reactive({
 })
 const alertQuery = reactive({ page: 1, page_size: 50, q: '', status: '已处理' })
 const resourceQuery = reactive({ page: 1, page_size: 50, q: '', source_status: '', resource_type: '' })
+const standardSearchQuery = reactive({ page: 1, page_size: 50, q: '', source_status: '', resource_type: '' })
 const versionQuery = reactive({ page: 1, page_size: 50 })
 const fileMatchQuery = reactive({ page: 1, page_size: 50 })
 const statusSyncQuery = reactive({ page: 1, page_size: 50 })
@@ -1013,6 +1110,7 @@ const urlPager = reactive<CursorPager>({ page: 1, cursors: [null], nextCursor: n
 const documentPager = reactive<CursorPager>({ page: 1, cursors: [null], nextCursor: null, hasMore: false })
 const alertPager = reactive<CursorPager>({ page: 1, cursors: [null], nextCursor: null, hasMore: false })
 const resourcePager = reactive<CursorPager>({ page: 1, cursors: [null], nextCursor: null, hasMore: false })
+const standardSearchPager = reactive<CursorPager>({ page: 1, cursors: [null], nextCursor: null, hasMore: false })
 const versionPager = reactive<CursorPager>({ page: 1, cursors: [null], nextCursor: null, hasMore: false })
 const fileMatchPager = reactive<CursorPager>({ page: 1, cursors: [null], nextCursor: null, hasMore: false })
 const statusSyncPager = reactive<CursorPager>({ page: 1, cursors: [null], nextCursor: null, hasMore: false })
@@ -1091,6 +1189,11 @@ async function resetFileMatches() {
   await loadFileMatches()
 }
 
+async function resetStandardSearch() {
+  resetCursorPager(standardSearchPager)
+  await loadStandardSearch()
+}
+
 async function resetVersions() {
   resetCursorPager(versionPager)
   await loadVersions()
@@ -1128,6 +1231,7 @@ function switchView(view: string) {
     loadCollectionTasks()
   }
   if (view === 'trustedResources') loadTrustedResources()
+  if (view === 'standardSearch') loadStandardSearch()
   if (view === 'fileMatches') loadFileMatches()
   if (view === 'sourceChanges') loadSourceChanges()
   if (view === 'statusSyncLogs') loadStatusSyncLogs()
@@ -1319,9 +1423,58 @@ async function loadTrustedResources() {
   applyPageResult(resourceQuery, resourcePager, res.data)
 }
 
+async function loadStandardSearch() {
+  const res = await api.get<Page<StandardResource>>('/standard-resources/page', {
+    params: pageParams(standardSearchQuery, standardSearchPager),
+  })
+  standardSearchResources.value = res.data.items
+  standardSearchTotal.value = res.data.total
+  applyPageResult(standardSearchQuery, standardSearchPager, res.data)
+}
+
 async function resetTrustedResources() {
   resetCursorPager(resourcePager)
   await loadTrustedResources()
+}
+
+function captchaImageSrc() {
+  if (!captchaChallenge.value) return ''
+  return `data:${captchaChallenge.value.captcha_content_type};base64,${captchaChallenge.value.captcha_image_base64}`
+}
+
+async function openResourceDownload(row: StandardResource) {
+  selectedDownloadResource.value = row
+  captchaCode.value = ''
+  showResourceDownloadDialog.value = true
+  await refreshResourceCaptcha()
+}
+
+async function refreshResourceCaptcha() {
+  if (!selectedDownloadResource.value) return
+  downloadCaptchaLoadingId.value = selectedDownloadResource.value.id
+  try {
+    const res = await api.post<ResourceDownloadCaptchaChallenge>(`/standard-resources/${selectedDownloadResource.value.id}/download-captcha`)
+    captchaChallenge.value = res.data
+    captchaCode.value = ''
+  } finally {
+    downloadCaptchaLoadingId.value = null
+  }
+}
+
+async function submitResourceDownload() {
+  if (!selectedDownloadResource.value || !captchaChallenge.value) return
+  resourceDownloadSubmitting.value = true
+  try {
+    const res = await api.post<UrlCheckResult>(`/standard-resources/${selectedDownloadResource.value.id}/download-with-captcha`, {
+      challenge_id: captchaChallenge.value.challenge_id,
+      verify_code: captchaCode.value,
+    })
+    ElMessage.success(res.data.message || '真实文件已入库')
+    showResourceDownloadDialog.value = false
+    await Promise.all([loadStandardSearch(), loadVersions(), loadCounts()])
+  } finally {
+    resourceDownloadSubmitting.value = false
+  }
 }
 
 async function loadTrustedSources() {
@@ -1469,5 +1622,36 @@ onMounted(loadAll)
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.inline-alert {
+  margin-bottom: 14px;
+}
+
+.captcha-download {
+  display: grid;
+  gap: 14px;
+}
+
+.captcha-title {
+  margin: 0;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.captcha-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.captcha-image {
+  width: 132px;
+  height: 44px;
+  object-fit: contain;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  cursor: pointer;
+  background: #fff;
 }
 </style>

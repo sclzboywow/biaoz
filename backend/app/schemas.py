@@ -213,6 +213,20 @@ class UrlCheckResult(BaseModel):
     change_type: str | None = None
 
 
+class ResourceDownloadCaptchaChallenge(BaseModel):
+    resource_id: int
+    challenge_id: str
+    captcha_image_base64: str
+    captcha_content_type: str
+    expires_at: datetime
+    message: str
+
+
+class ResourceDownloadCaptchaSubmit(BaseModel):
+    challenge_id: str
+    verify_code: str
+
+
 class CheckAllResult(BaseModel):
     total: int
     results: list[UrlCheckResult]
