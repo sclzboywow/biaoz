@@ -478,7 +478,7 @@
           </el-table-column>
           <el-table-column label="操作" width="150" fixed="right">
             <template #default="{ row }">
-              <el-button size="small" type="primary" :loading="downloadCaptchaLoadingId === row.id" @click.stop="openResourceDownload(row)">
+              <el-button size="small" type="primary" :disabled="!row.pdf_trial_url" :loading="downloadCaptchaLoadingId === row.id" @click.stop="openResourceDownload(row)">
                 下载文件
               </el-button>
             </template>
@@ -1514,6 +1514,10 @@ function captchaImageSrc() {
 }
 
 async function openResourceDownload(row: StandardResource) {
+  if (!row.pdf_trial_url) {
+    ElMessage.warning('该来源暂未采集到可下载的官方全文入口')
+    return
+  }
   selectedDownloadResource.value = row
   captchaCode.value = ''
   showResourceDownloadDialog.value = true

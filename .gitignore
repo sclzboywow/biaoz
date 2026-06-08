@@ -12,6 +12,8 @@ data/
 logs/
 .runtime/
 .playwright-cli/
+.chrome-spc-ingest-debug/
+.chrome-spc-member-profile/
 backend/data/
 backend/.venv/
 frontend/node_modules/
@@ -23,3 +25,7 @@ frontend/dist/
 *.csv
 dist-package/
 国标电子书库超级爬虫.py
+openxpanapi/账户信息.txt
+openxpanapi/*.txt
+!openxpanapi/README.md
+backend/openstd_download.html

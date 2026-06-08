@@ -33,7 +33,11 @@ from app.samr_std_sync import (  # noqa: E402
     _text,
     _upsert_resource,
 )
-from app.standard_number import normalize_standard_no  # noqa: E402
+from app.gb688_captcha_download import (
+    Gb688CaptchaError,
+    Gb688DownloadUnavailableError,
+    download_gb688_pdf_from_row,
+)
 from app.settings_store import get_int_setting  # noqa: E402
 from app.status_calibration import attach_change_logs_to_documents, calibrate_resource_status  # noqa: E402
 from app.storage import check_storage_root  # noqa: E402
@@ -409,28 +413,21 @@ def try_archive_pdf(db, client: httpx.Client, resource: models.StandardResource,
     if not hcno:
         return {"download_attempted": 0, "download_archived": 0, "download_skipped": 0, "skip_reason": "no OPEN_HASH_CODE"}
     url = _download_url(hcno)
-    response = client.get(
-        url,
-        headers={
-            "Accept": "application/pdf,*/*",
-            "Referer": _online_url(hcno),
-            "X-Requested-With": "",
-        },
-    )
-    content_type = response.headers.get("content-type") or ""
-    if response.status_code >= 400:
+    try:
+        downloaded = download_gb688_pdf_from_row(row, timeout_seconds=60, client=client)
+    except Gb688DownloadUnavailableError as exc:
         return {
             "download_attempted": 1,
             "download_archived": 0,
             "download_skipped": 1,
-            "skip_reason": f"HTTP {response.status_code}",
+            "skip_reason": str(exc),
         }
-    if not response.content.startswith(b"%PDF"):
+    except Gb688CaptchaError as exc:
         return {
             "download_attempted": 1,
             "download_archived": 0,
             "download_skipped": 1,
-            "skip_reason": f"not pdf: {content_type or 'unknown'}",
+            "skip_reason": f"captcha: {exc}",
         }
 
     url_source = _create_or_get_url_source(db, url, resource)
@@ -438,13 +435,7 @@ def try_archive_pdf(db, client: httpx.Client, resource: models.StandardResource,
         db,
         url_source,
         check_storage_root(db, Path(os.getenv("STORAGE_ROOT", "G:/data/standard-docs"))).root,
-        DownloadedContent(
-            status_code=response.status_code,
-            url=str(response.url),
-            content=response.content,
-            content_type=content_type,
-            content_disposition=response.headers.get("content-disposition"),
-        ),
+        downloaded,
     )
     return {
         "download_attempted": 1,

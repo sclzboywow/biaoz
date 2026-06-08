@@ -15,8 +15,10 @@ from sqlalchemy.orm import Session
 
 from app import models, schemas
 from app.alerts import mark_alert_auto_handled
+from app.baidu_pan_storage import BaiduPanClient, BaiduPanError, load_baidu_pan_config
 from app.standard_number import normalize_standard_no
 from app.storage import check_storage_root, relative_storage_path
+from app.settings_store import get_setting
 
 
 DEFAULT_DOWNLOAD_TIMEOUT_SECONDS = 30
@@ -87,12 +89,27 @@ def sha256_bytes(content: bytes) -> str:
 
 
 def write_archive_file(storage_root: Path, source_id: int, file_name: str, content: bytes) -> Path:
-    now = datetime.now(UTC)
-    target_dir = storage_root / "url-sources" / str(source_id) / now.strftime("%Y%m%d")
+    relative_path = archive_relative_path(source_id, file_name)
+    target_path = storage_root / relative_path
+    target_dir = target_path.parent
     target_dir.mkdir(parents=True, exist_ok=True)
-    target_path = target_dir / f"{now.strftime('%H%M%S')}_{Path(file_name).name}"
     target_path.write_bytes(content)
     return target_path
+
+
+def archive_relative_path(source_id: int, file_name: str) -> str:
+    now = datetime.now(UTC)
+    return f"url-sources/{source_id}/{now.strftime('%Y%m%d')}/{now.strftime('%H%M%S')}_{Path(file_name).name}"
+
+
+def archive_object_relative_path(file_hash: str, file_name: str) -> str:
+    suffix = Path(file_name).suffix.lower() or ".bin"
+    return f"objects/sha256/{file_hash[:2]}/{file_hash[2:4]}/{file_hash}{suffix}"
+
+
+def configured_storage_backend(db: Session) -> str:
+    backend = (os.getenv("STORAGE_BACKEND") or get_setting(db, "storage_backend", "local") or "local").strip().lower()
+    return backend if backend in {"local", "baidu_pan", "dual"} else "local"
 
 
 def create_alert(
@@ -218,8 +235,10 @@ def archive_downloaded_content(
     storage_root: Path,
     downloaded: DownloadedContent,
 ) -> schemas.UrlCheckResult:
-    storage_status = check_storage_root(db, storage_root)
-    if not storage_status.available and storage_status.pause_download_if_unavailable:
+    storage_backend = configured_storage_backend(db)
+    needs_local_storage = storage_backend in {"local", "dual"}
+    storage_status = check_storage_root(db, storage_root) if needs_local_storage else None
+    if storage_status and not storage_status.available and storage_status.pause_download_if_unavailable:
         return record_download_failure(
             db,
             source,
@@ -312,14 +331,34 @@ def archive_downloaded_content(
         alert_type = "新增文件"
         message = f"首次归档：{file_name}"
 
-    target_path = write_archive_file(storage_status.root, source.id, file_name, downloaded.content)
+    relative_path = archive_relative_path(source.id, file_name)
+    storage_path = ""
+    if storage_backend in {"baidu_pan", "dual"}:
+        try:
+            remote_relative_path = archive_object_relative_path(file_hash, file_name)
+            remote_result = BaiduPanClient(load_baidu_pan_config(db)).upload_bytes(downloaded.content, remote_relative_path)
+            storage_path = remote_result.uri
+        except BaiduPanError as exc:
+            return record_download_failure(db, source, DownloadFailure(None, f"百度网盘归档失败：{exc}", "远端存储失败"))
+
+    if needs_local_storage:
+        if storage_status is None or not storage_status.available:
+            return record_download_failure(
+                db,
+                source,
+                DownloadFailure(None, "本地存储不可用，无法归档文件", "存储目录不可用"),
+            )
+        target_path = write_archive_file(storage_status.root, source.id, file_name, downloaded.content)
+        if not storage_path:
+            storage_path = relative_storage_path(storage_status.root, target_path)
+
     version_count = len(document.versions) + 1
     version = models.DocumentVersion(
         document_id=document.id,
         url_source_id=source.id,
         version_no=f"v{version_count}",
         file_name=file_name,
-        file_path=relative_storage_path(storage_status.root, target_path),
+        file_path=storage_path,
         file_hash=file_hash,
         file_size=len(downloaded.content),
         content_hash=file_hash,
@@ -371,8 +410,9 @@ def check_url_source(
     storage_root: Path,
     timeout_seconds: int = DEFAULT_DOWNLOAD_TIMEOUT_SECONDS,
 ) -> schemas.UrlCheckResult:
-    storage_status = check_storage_root(db, storage_root)
-    if not storage_status.available and storage_status.pause_download_if_unavailable:
+    storage_backend = configured_storage_backend(db)
+    storage_status = check_storage_root(db, storage_root) if storage_backend in {"local", "dual"} else None
+    if storage_status and not storage_status.available and storage_status.pause_download_if_unavailable:
         return record_download_failure(
             db,
             source,

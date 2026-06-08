@@ -12,18 +12,21 @@ from pathlib import Path
 import httpx
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy import desc, func, or_, select
 from sqlalchemy.orm import Session
 
 from app import crud, models, schemas
 from app.alerts import auto_handle_pending_alerts
+from app.baidu_pan_storage import BaiduPanClient, BaiduPanError, is_baidu_pan_uri, load_baidu_pan_config
 from app.collection_tasks import normalize_collection_batch_size, run_url_check_task, stream_url_source_ids
 from app.config import get_settings
 from app.database import SessionLocal, get_db
 from app.download_service import DownloadedContent, archive_downloaded_content
 from app.guobiao_discovery import sync_discovered_sublibs
 from app.guobiao_sync import sync_guobiao_resources  # noqa: F401  # imports and registers guobiao adapter
+from app import samr_public_adapters  # noqa: F401  # imports and registers non-GB SAMR public adapters
+from app import spc_online_adapter  # noqa: F401  # imports and registers SPC online adapter
 from app.samr_std_sync import _download_url, _online_url, sync_samr_std_resources  # noqa: F401  # imports and registers samr adapter
 from app.scheduler import run_url_check_loop
 from app.settings_store import (
@@ -82,7 +85,7 @@ def health() -> dict[str, str]:
 api = FastAPI()
 
 CAPTCHA_CHALLENGE_TTL_SECONDS = 600
-GB688_BASE_URL = "http://c.gb688.cn/bzgk/gb"
+OPENSTD_STD_BASE = "https://openstd.samr.gov.cn/bzgk/std"
 
 
 def captcha_challenges() -> dict[str, dict]:
@@ -105,6 +108,24 @@ def extract_hcno(resource: models.StandardResource) -> str | None:
     return None
 
 
+def samr_portal_download_base(resource: models.StandardResource) -> str | None:
+    text = "\n".join(value for value in [resource.pdf_trial_url, resource.detail_url] if value)
+    match = re.search(r"https://(hbba|dbba)\.sacinfo\.org\.cn/(?:portal/online|stdDetail)/([A-Za-z0-9]+)", text)
+    if not match:
+        return None
+    return f"https://{match.group(1)}.sacinfo.org.cn"
+
+
+def extract_samr_portal_pk(resource: models.StandardResource) -> str | None:
+    text = "\n".join(value for value in [resource.pdf_trial_url, resource.detail_url] if value)
+    match = re.search(r"https://(?:hbba|dbba)\.sacinfo\.org\.cn/(?:portal/online|stdDetail)/([A-Za-z0-9]+)", text)
+    if match:
+        return match.group(1)
+    if resource.source_book_id and re.fullmatch(r"[A-Za-z0-9]{32,128}", resource.source_book_id):
+        return resource.source_book_id
+    return None
+
+
 def create_or_get_download_url_source(db: Session, resource: models.StandardResource, url: str) -> models.UrlSource:
     source = db.scalars(select(models.UrlSource).where(models.UrlSource.url == url)).first()
     if source:
@@ -114,7 +135,7 @@ def create_or_get_download_url_source(db: Session, resource: models.StandardReso
         source_name=resource.standard_name or resource.standard_no or url,
         source_unit=resource.source_name,
         source_type="官方标准PDF",
-        category="国家标准",
+        category=resource.resource_type or "标准资源",
         check_frequency="manual",
         status=models.SourceStatus.normal.value,
         remark=f"standard_no={resource.standard_no or ''}; standard_resource_id={resource.id}; captcha=manual",
@@ -433,9 +454,29 @@ async def upload_document_version(
     if not storage_status.available:
         raise HTTPException(status_code=400, detail=f"存储目录不可用：{storage_status.message}；目录：{storage_status.root}")
     target_path, size, file_hash = await save_upload(file, storage_status.root, document_id)
-    duplicate = latest is not None and latest.file_hash == file_hash
+    existing = db.scalars(
+        select(models.DocumentVersion)
+        .where(models.DocumentVersion.document_id == document_id, models.DocumentVersion.file_hash == file_hash)
+        .order_by(
+            desc(models.DocumentVersion.is_current),
+            desc(models.DocumentVersion.downloaded_at),
+            desc(models.DocumentVersion.id),
+        )
+    ).first()
 
-    if latest and not duplicate:
+    if existing:
+        target_path.unlink(missing_ok=True)
+        db.query(models.DocumentVersion).filter(
+            models.DocumentVersion.document_id == document_id,
+            models.DocumentVersion.id != existing.id,
+        ).update({"is_current": False})
+        existing.is_current = True
+        document.current_version_id = existing.id
+        db.commit()
+        db.refresh(existing)
+        return schemas.UploadVersionResponse.model_validate(existing).model_copy(update={"duplicate": True})
+
+    if latest:
         latest.is_current = False
 
     version = models.DocumentVersion(
@@ -447,13 +488,15 @@ async def upload_document_version(
         file_hash=file_hash,
         file_size=size,
         content_hash=file_hash,
-        change_type=models.ChangeType.unchanged.value if duplicate else models.ChangeType.created.value,
+        change_type=models.ChangeType.created.value,
         is_current=True,
     )
     db.add(version)
+    db.flush()
+    document.current_version_id = version.id
     db.commit()
     db.refresh(version)
-    return schemas.UploadVersionResponse.model_validate(version).model_copy(update={"duplicate": duplicate})
+    return schemas.UploadVersionResponse.model_validate(version).model_copy(update={"duplicate": False})
 
 
 @api.get("/documents/{document_id}/versions", response_model=list[schemas.DocumentVersionOut])
@@ -557,6 +600,19 @@ def get_document_version_file(version_id: int, inline: bool = True, db: Session 
     version = db.get(models.DocumentVersion, version_id)
     if version is None:
         raise HTTPException(status_code=404, detail="Document version does not exist.")
+    if is_baidu_pan_uri(version.file_path):
+        try:
+            content, content_type = BaiduPanClient(load_baidu_pan_config(db)).download_uri(version.file_path)
+        except BaiduPanError as exc:
+            raise HTTPException(status_code=502, detail=f"Remote archived file is unavailable: {exc}") from exc
+        media_type, _encoding = mimetypes.guess_type(version.file_name or "download.bin")
+        disposition = "inline" if inline else "attachment"
+        filename = version.file_name or "download.bin"
+        return Response(
+            content,
+            media_type=content_type or media_type or "application/octet-stream",
+            headers={"Content-Disposition": f'{disposition}; filename="{filename}"'},
+        )
     file_path = resolve_document_version_file(db, version)
     media_type, _encoding = mimetypes.guess_type(version.file_name or file_path.name)
     return FileResponse(
@@ -851,11 +907,64 @@ def create_resource_download_captcha(resource_id: int, db: Session = Depends(get
     if resource is None:
         raise HTTPException(status_code=404, detail="可信源资源不存在")
     hcno = extract_hcno(resource)
-    if not hcno:
-        raise HTTPException(status_code=400, detail="该标准暂未入库官方全文入口，无法生成验证码")
+    samr_base_url = samr_portal_download_base(resource)
+    samr_pk = extract_samr_portal_pk(resource)
+    if not hcno and not (samr_base_url and samr_pk):
+        raise HTTPException(status_code=400, detail="该标准暂未入库可下载的官方全文入口，无法生成验证码")
 
-    download_page_url = _download_url(hcno)
-    captcha_url = f"{GB688_BASE_URL}/gc?_{int(time.time() * 1000)}"
+    if samr_base_url and samr_pk and not hcno:
+        online_url = f"{samr_base_url}/portal/online/{samr_pk}"
+        captcha_url = f"{samr_base_url}/portal/validate-code?pk={samr_pk}&t={int(time.time() * 1000)}"
+        try:
+            with httpx.Client(
+                follow_redirects=True,
+                timeout=get_int_setting(db, "download_timeout_seconds", 30),
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) StandardDocsIngest/1.0",
+                    "Accept-Language": "zh-CN,zh;q=0.9",
+                },
+            ) as client:
+                page = client.get(online_url, headers={"Accept": "text/html,*/*", "Referer": resource.detail_url or samr_base_url})
+                page.raise_for_status()
+                if "/portal/validate-code" not in page.text:
+                    reason_match = re.search(r"<p>(.*?)</p>", page.text, flags=re.S)
+                    reason = re.sub(r"\s+", " ", reason_match.group(1)).strip() if reason_match else ""
+                    detail = f"该来源当前未提供本平台验证码下载入口{f'：{reason}' if reason else ''}"
+                    raise HTTPException(status_code=400, detail=detail)
+                captcha = client.get(
+                    captcha_url,
+                    headers={"Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8", "Referer": online_url},
+                )
+                captcha.raise_for_status()
+                content_type = captcha.headers.get("content-type") or "image/jpeg"
+                if not content_type.lower().startswith("image/"):
+                    raise HTTPException(status_code=502, detail=f"验证码接口返回异常：{content_type}")
+                challenge_id = secrets.token_urlsafe(24)
+                expires_at = datetime.now(UTC) + timedelta(seconds=CAPTCHA_CHALLENGE_TTL_SECONDS)
+                captcha_challenges()[challenge_id] = {
+                    "provider": "samr_portal",
+                    "resource_id": resource.id,
+                    "base_url": samr_base_url,
+                    "pk": samr_pk,
+                    "cookies": dict(client.cookies),
+                    "expires_at": expires_at,
+                }
+        except HTTPException:
+            raise
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"获取官方验证码失败：{exc}") from exc
+
+        return schemas.ResourceDownloadCaptchaChallenge(
+            resource_id=resource.id,
+            challenge_id=challenge_id,
+            captcha_image_base64=base64.b64encode(captcha.content).decode("ascii"),
+            captcha_content_type=content_type,
+            expires_at=expires_at,
+            message="请输入图片验证码后下载真实 PDF；验证码只用于本次官方下载会话。",
+        )
+
+    download_page_url = f"{OPENSTD_STD_BASE}/showGb?type=download&hcno={hcno}"
+    captcha_url = f"{OPENSTD_STD_BASE}/gc"
     try:
         with httpx.Client(
             follow_redirects=True,
@@ -875,6 +984,7 @@ def create_resource_download_captcha(resource_id: int, db: Session = Depends(get
             challenge_id = secrets.token_urlsafe(24)
             expires_at = datetime.now(UTC) + timedelta(seconds=CAPTCHA_CHALLENGE_TTL_SECONDS)
             captcha_challenges()[challenge_id] = {
+                "provider": "gb688",
                 "resource_id": resource.id,
                 "hcno": hcno,
                 "cookies": dict(client.cookies),
@@ -911,10 +1021,80 @@ def download_resource_with_captcha(
     if not verify_code:
         raise HTTPException(status_code=400, detail="请输入验证码")
 
-    hcno = challenge["hcno"]
     cookies = challenge.get("cookies") or {}
-    verify_url = f"{GB688_BASE_URL}/verifyCode"
-    file_url = f"{GB688_BASE_URL}/viewGb?hcno={hcno}"
+    provider = challenge.get("provider") or "gb688"
+    if provider == "samr_portal":
+        base_url = challenge.get("base_url")
+        pk = challenge.get("pk")
+        if not base_url or not pk:
+            raise HTTPException(status_code=400, detail="验证码会话缺少官方下载参数，请刷新验证码")
+        online_url = f"{base_url}/portal/online/{pk}"
+        try:
+            with httpx.Client(
+                follow_redirects=True,
+                timeout=get_int_setting(db, "download_timeout_seconds", 30),
+                cookies=cookies,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) StandardDocsIngest/1.0",
+                    "Accept-Language": "zh-CN,zh;q=0.9",
+                },
+            ) as client:
+                verify = client.post(
+                    f"{base_url}/portal/validate-captcha/down",
+                    data={"captcha": verify_code, "pk": pk},
+                    headers={
+                        "Accept": "application/json,text/javascript,*/*;q=0.8",
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Referer": online_url,
+                    },
+                )
+                verify.raise_for_status()
+                try:
+                    verify_payload = verify.json()
+                except ValueError as exc:
+                    raise HTTPException(status_code=502, detail="官方验证码校验接口返回异常") from exc
+                if str(verify_payload.get("code")) != "0":
+                    raise HTTPException(status_code=400, detail=verify_payload.get("msg") or "验证码不正确，请重新获取验证码后重试")
+                download_token = str(verify_payload.get("msg") or "").strip()
+                if not download_token:
+                    raise HTTPException(status_code=502, detail="官方验证码校验未返回下载码")
+                file_url = f"{base_url}/portal/download/{download_token}"
+                response = client.get(
+                    file_url,
+                    headers={"Accept": "application/pdf,*/*", "Referer": online_url},
+                )
+                response.raise_for_status()
+        except HTTPException:
+            raise
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"官方文件下载失败：{exc}") from exc
+
+        content_type = response.headers.get("content-type") or ""
+        if not response.content.startswith(b"%PDF"):
+            raise HTTPException(status_code=400, detail=f"官方返回内容不是 PDF，已拒绝入库：{content_type or 'unknown'}")
+
+        url_source = create_or_get_download_url_source(db, resource, file_url)
+        result = archive_downloaded_content(
+            db,
+            url_source,
+            settings.storage_root,
+            DownloadedContent(
+                status_code=response.status_code,
+                url=str(response.url),
+                content=response.content,
+                content_type=content_type,
+                content_disposition=response.headers.get("content-disposition"),
+            ),
+        )
+        if result.ok:
+            db.refresh(resource)
+            calibrate_resource_status(db, resource)
+            db.commit()
+        return result
+
+    hcno = challenge["hcno"]
+    verify_url = f"{OPENSTD_STD_BASE}/verifyCode"
+    file_url = f"{OPENSTD_STD_BASE}/viewGb?hcno={hcno}"
     try:
         with httpx.Client(
             follow_redirects=True,

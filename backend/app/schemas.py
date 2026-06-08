@@ -196,7 +196,7 @@ class AlertOut(AlertCreate, OrmModel):
 
 
 class UploadVersionResponse(DocumentVersionOut):
-    duplicate: bool = Field(description="是否与当前版本 hash 相同")
+    duplicate: bool = Field(default=False, description="是否与当前版本 hash 相同")
 
 
 class UrlCheckResult(BaseModel):

@@ -18,6 +18,7 @@ from app.trusted_source_adapters import TrustedSourceAdapter, TrustedSourceSyncO
 
 BASE_URL = "https://std.samr.gov.cn"
 OPEN_STD_URL = "https://openstd.samr.gov.cn"
+OPEN_STD_STD_BASE = f"{OPEN_STD_URL}/bzgk/std"
 GB688_URL = "http://c.gb688.cn"
 SOURCE_NAME = "全国标准信息公共服务平台"
 GB_CATEGORY_ID = "gb"
@@ -180,15 +181,15 @@ def _open_info_url(hcno: str) -> str:
 
 
 def _online_url(hcno: str) -> str:
-    return f"{GB688_URL}/bzgk/gb/showGb?type=online&hcno={hcno}&request_locale=zh"
+    return f"{OPEN_STD_STD_BASE}/showGb?type=online&hcno={hcno}"
 
 
 def _download_url(hcno: str) -> str:
-    return f"{GB688_URL}/bzgk/gb/showGb?type=download&hcno={hcno}&request_locale=zh"
+    return f"{OPEN_STD_STD_BASE}/showGb?type=download&hcno={hcno}"
 
 
 def _review_url(hcno: str) -> str:
-    return f"{GB688_URL}/bzgk/gb/review?hcno={hcno}"
+    return f"{OPEN_STD_URL}/bzgk/gb/review?hcno={hcno}"
 
 
 def _official_links(row: dict[str, Any], item_id: str) -> dict[str, str]:
