@@ -170,14 +170,19 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Governance acceptance smoke test")
     parser.add_argument("--api-base", default=os.getenv("API_BASE", "http://127.0.0.1:8000"))
     parser.add_argument("--skip-http", action="store_true")
+    parser.add_argument("--http-only", action="store_true", help="Skip DB schema checks (use after docker compose up)")
     args = parser.parse_args()
 
-    print("== Schema checks ==")
-    schema_errors = check_schema()
+    schema_errors: list[str] = []
+    if args.http_only:
+        print("== Schema checks ==\nSKIP (--http-only)")
+    else:
+        print("== Schema checks ==")
+        schema_errors = check_schema()
     if schema_errors:
         for err in schema_errors:
             print(f"FAIL {err}")
-    else:
+    elif not args.http_only:
         print("OK schema tables/columns/alembic head")
 
     http_errors: list[str] = []

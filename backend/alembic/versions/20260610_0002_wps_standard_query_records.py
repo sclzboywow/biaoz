@@ -7,6 +7,7 @@ Create Date: 2026-06-10
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 
 revision = "20260610_0002"
 down_revision = "20260528_0001"
@@ -15,6 +16,9 @@ depends_on = None
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
+    if inspect(bind).has_table("wps_standard_query_records"):
+        return
     op.create_table(
         "wps_standard_query_records",
         sa.Column("id", sa.Integer(), nullable=False),
