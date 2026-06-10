@@ -399,6 +399,26 @@ class SourceStatusSyncLog(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class WpsStandardQueryRecord(TimestampMixin, Base):
+    """WPS 多维表「标准查询系统」原始快照，供后续数据治理。"""
+
+    __tablename__ = "wps_standard_query_records"
+    __table_args__ = (UniqueConstraint("wps_record_id", name="uq_wps_standard_query_records_wps_record_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    wps_record_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    serial_no: Mapped[int | None] = mapped_column(Integer, index=True)
+    file_no: Mapped[str | None] = mapped_column(Text, index=True)
+    file_name: Mapped[str | None] = mapped_column(Text)
+    impl_status: Mapped[str | None] = mapped_column(String(80), index=True)
+    link_url: Mapped[str | None] = mapped_column(Text)
+    goto_url: Mapped[str | None] = mapped_column(Text)
+    fields_json: Mapped[str] = mapped_column(Text, nullable=False)
+    wps_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_sheet: Mapped[str] = mapped_column(String(120), default="标准查询系统")
+    governance_status: Mapped[str] = mapped_column(String(40), default="pending", index=True)
+
+
 class CollectionTask(TimestampMixin, Base):
     __tablename__ = "collection_tasks"
 

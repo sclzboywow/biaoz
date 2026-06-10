@@ -22,14 +22,22 @@ SELECT
     WHEN us.url LIKE 'https://openstd.samr.gov.cn/bzgk/std/showGb?type=download%' THEN 'openstd_captcha'
     WHEN us.url LIKE 'https://hbba.sacinfo.org.cn/portal/online/%' THEN 'hbba_captcha'
     WHEN us.url LIKE 'https://dbba.sacinfo.org.cn/portal/online/%' THEN 'dbba_captcha'
+    WHEN us.url LIKE 'https://www.ttbz.org.cn/standardDetail/%' THEN 'ttbz_group'
+    WHEN us.url LIKE 'https://www.qybz.org.cn/user/detail/%' THEN 'qybz_enterprise'
     WHEN us.url LIKE 'https://%bba.sacinfo.org.cn/portal/download/%' THEN 'sacinfo_token'
     WHEN us.url LIKE 'spc-online-reading://%' THEN 'spc_online'
     WHEN dv.file_path LIKE 'baidupan:%' THEN 'legacy_baidupan'
     ELSE 'local_other'
   END AS channel,
   COUNT(*) AS total,
-  COUNT(*) FILTER (WHERE dv.file_path LIKE 'baidupan:%') AS on_baidu,
-  COUNT(*) FILTER (WHERE dv.file_path NOT LIKE 'baidupan:%') AS local_only,
+  COUNT(*) FILTER (
+    WHERE dv.file_path LIKE 'baidupan:%'
+    OR dv.remark LIKE '%remote_uri%baidupan:%'
+  ) AS on_baidu,
+  COUNT(*) FILTER (
+    WHERE dv.file_path NOT LIKE 'baidupan:%'
+    AND (dv.remark IS NULL OR dv.remark NOT LIKE '%remote_uri%baidupan:%')
+  ) AS local_only,
   COUNT(*) FILTER (WHERE dv.downloaded_at >= :since) AS recent
 FROM document_versions dv
 JOIN url_sources us ON us.id = dv.url_source_id
@@ -40,7 +48,18 @@ ORDER BY total DESC
 
 WORKER_SPECS: tuple[tuple[str, str, str], ...] = (
     ("openstd_captcha_loop", "openstd-file-loop.pid", "openstd-file-loop.out.log"),
-    ("sacinfo_captcha_loop", "sacinfo-portal-file-loop.pid", "sacinfo-portal-file-loop.out.log"),
+    (
+        "sacinfo_industry_captcha_loop",
+        "sacinfo-portal-industry-file-loop.pid",
+        "sacinfo-portal-industry-file-loop.out.log",
+    ),
+    (
+        "sacinfo_local_captcha_loop",
+        "sacinfo-portal-local-file-loop.pid",
+        "sacinfo-portal-local-file-loop.out.log",
+    ),
+    ("ttbz_group_loop", "ttbz-file-loop.pid", "ttbz-file-loop.out.log"),
+    ("qybz_enterprise_loop", "qybz-file-loop.pid", "qybz-file-loop.out.log"),
     ("spc_online_loop", "spc-file-loop.pid", "spc-file-loop.out.log"),
 )
 
@@ -49,6 +68,10 @@ OPENSTD_OK_RE = re.compile(r'"ok": true.*"status": "archived"')
 OPENSTD_FAIL_RE = re.compile(r'"ok": false')
 SACINFO_OK_RE = re.compile(r'sacinfo_batch_result .*"ok": true.*"status": "archived"')
 SACINFO_FAIL_RE = re.compile(r'sacinfo_batch_result .*"ok": false')
+TTBZ_OK_RE = re.compile(r'ttbz_batch_result .*"ok": true.*"status": "archived"')
+TTBZ_FAIL_RE = re.compile(r'ttbz_batch_result .*"ok": false')
+QYBZ_OK_RE = re.compile(r'qybz_batch_result .*"ok": true.*"status": "archived"')
+QYBZ_FAIL_RE = re.compile(r'qybz_batch_result .*"ok": false')
 SPC_OK_RE = re.compile(r'spc_batch_result .*"ok": true')
 SPC_FAIL_RE = re.compile(r'spc_batch_result .*"ok": false')
 
@@ -79,7 +102,7 @@ def _count_log_events(path: Path, since: datetime, ok_pattern: re.Pattern[str], 
                 fail += 1
             continue
         if ts is None and path.stat().st_mtime > since.timestamp():
-            if line.startswith("openstd_batch_result ") or line.startswith("sacinfo_batch_result ") or line.startswith("spc_batch_result "):
+            if line.startswith("openstd_batch_result ") or line.startswith("sacinfo_batch_result ") or line.startswith("ttbz_batch_result ") or line.startswith("qybz_batch_result ") or line.startswith("spc_batch_result "):
                 scanned += 1
                 if ok_pattern.search(line):
                     ok += 1
@@ -88,22 +111,53 @@ def _count_log_events(path: Path, since: datetime, ok_pattern: re.Pattern[str], 
     return {"ok": ok, "fail": fail, "lines_scanned": scanned}
 
 
+def _merge_log_activity(*activities: dict[str, int]) -> dict[str, int]:
+    merged = {"ok": 0, "fail": 0, "lines_scanned": 0}
+    for activity in activities:
+        for key in merged:
+            merged[key] += activity.get(key, 0)
+    return merged
+
+
+def _read_pid_file(pid_path: Path) -> int | None:
+    if not pid_path.exists():
+        return None
+    raw = pid_path.read_text(encoding="utf-8-sig", errors="replace").strip()
+    if raw.isdigit():
+        return int(raw)
+    return None
+
+
+def _process_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if handle:
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        return False
+
+    import os
+
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
 def _worker_status(name: str, pid_file: str, log_file: str) -> dict:
     pid_path = LOG_DIR / pid_file
     log_path = LOG_DIR / log_file
     pid: int | None = None
     alive = False
-    if pid_path.exists():
-        raw = pid_path.read_text(encoding="utf-8", errors="replace").strip()
-        if raw.isdigit():
-            pid = int(raw)
-            try:
-                import os
-
-                os.kill(pid, 0)
-                alive = True
-            except OSError:
-                alive = False
+    pid = _read_pid_file(pid_path)
+    if pid is not None:
+        alive = _process_alive(pid)
     log_mtime: str | None = None
     if log_path.exists():
         log_mtime = datetime.fromtimestamp(log_path.stat().st_mtime, UTC).isoformat()
@@ -136,8 +190,14 @@ def collect_report(*, interval_minutes: int) -> dict:
                 """
                 SELECT
                   COUNT(*) AS current_versions,
-                  COUNT(*) FILTER (WHERE file_path LIKE 'baidupan:%') AS on_baidu,
-                  COUNT(*) FILTER (WHERE file_path NOT LIKE 'baidupan:%') AS local_only,
+                  COUNT(*) FILTER (
+                    WHERE file_path LIKE 'baidupan:%'
+                    OR remark LIKE '%remote_uri%baidupan:%'
+                  ) AS on_baidu,
+                  COUNT(*) FILTER (
+                    WHERE file_path NOT LIKE 'baidupan:%'
+                    AND (remark IS NULL OR remark NOT LIKE '%remote_uri%baidupan:%')
+                  ) AS local_only,
                   COUNT(*) FILTER (WHERE downloaded_at >= :since) AS recent
                 FROM document_versions
                 WHERE is_current = true
@@ -173,12 +233,24 @@ def collect_report(*, interval_minutes: int) -> dict:
         ).all()
 
     workers = [_worker_status(*spec) for spec in WORKER_SPECS]
+    sacinfo_industry_activity = _count_log_events(
+        LOG_DIR / "sacinfo-portal-industry-file-loop.out.log", since, SACINFO_OK_RE, SACINFO_FAIL_RE
+    )
+    sacinfo_local_activity = _count_log_events(
+        LOG_DIR / "sacinfo-portal-local-file-loop.out.log", since, SACINFO_OK_RE, SACINFO_FAIL_RE
+    )
     log_activity = {
         "openstd_captcha_loop": _count_log_events(
             LOG_DIR / "openstd-file-loop.out.log", since, OPENSTD_OK_RE, OPENSTD_FAIL_RE
         ),
-        "sacinfo_captcha_loop": _count_log_events(
-            LOG_DIR / "sacinfo-portal-file-loop.out.log", since, SACINFO_OK_RE, SACINFO_FAIL_RE
+        "sacinfo_industry_captcha_loop": sacinfo_industry_activity,
+        "sacinfo_local_captcha_loop": sacinfo_local_activity,
+        "sacinfo_captcha_loop": _merge_log_activity(sacinfo_industry_activity, sacinfo_local_activity),
+        "ttbz_group_loop": _count_log_events(
+            LOG_DIR / "ttbz-file-loop.out.log", since, TTBZ_OK_RE, TTBZ_FAIL_RE
+        ),
+        "qybz_enterprise_loop": _count_log_events(
+            LOG_DIR / "qybz-file-loop.out.log", since, QYBZ_OK_RE, QYBZ_FAIL_RE
         ),
         "spc_online_loop": _count_log_events(LOG_DIR / "spc-file-loop.out.log", since, SPC_OK_RE, SPC_FAIL_RE),
     }
@@ -218,6 +290,7 @@ def format_text(report: dict) -> str:
     lines = [
         f"[{report['reported_at']}] ingest monitor ({interval}m)",
         f"storage={report['storage_backend']} | versions={s['current_versions_total']} baidu={s['on_baidu_total']} local_only={s['local_only_total']} | +{s[f'ingested_last_{interval}m_total']} in last {interval}m",
+        "policy=dual: local file_path + baidu_pan_sync remark | loops auto-revive via monitor",
         (
             "channels: "
             f"openstd={s['openstd_captcha_total']} (+{s[f'openstd_last_{interval}m']}) | "
@@ -229,6 +302,9 @@ def format_text(report: dict) -> str:
     for worker in report["workers"]:
         state = "running" if worker["alive"] else "stopped"
         lines.append(f"worker {worker['name']}: {state} pid={worker['pid']}")
+    failure_log = LOG_DIR / "baidu-upload-failures.jsonl"
+    if failure_log.exists():
+        lines.append(f"trace log: {failure_log}")
     for name, activity in report["log_activity_last_interval"].items():
         lines.append(f"log {name}: ok={activity['ok']} fail={activity['fail']}")
     return "\n".join(lines)

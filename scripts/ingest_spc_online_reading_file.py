@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import websockets
+from sqlalchemy.exc import IntegrityError
 
 ROOT = Path(__file__).resolve().parents[1]
 BACKEND = ROOT / "backend"
@@ -22,14 +23,20 @@ if str(BACKEND) not in sys.path:
 os.chdir(BACKEND)
 
 from app import models  # noqa: E402
+from app import schemas  # noqa: E402
 from app.config import get_settings  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
-from app.download_service import DownloadedContent, archive_downloaded_content  # noqa: E402
+from app.download_service import (  # noqa: E402
+    DownloadedContent,
+    archive_downloaded_content,
+    configured_storage_backend,
+)
 from app.settings_store import ensure_default_settings  # noqa: E402
 from app.storage import configured_storage_root  # noqa: E402
 
 
 SPC_BASE_URL = "https://www.spc.org.cn"
+SPC_TAB_STATE_FILE = ROOT / "logs" / "spc-ingest-tab.json"
 ONLINE_READING_RE = re.compile(r"/stdlib/onlinereading\?token=", re.I)
 RATE_LIMIT_TOKENS = ("请求过多", "访问过于频繁", "Too Many Requests", "429")
 ONLINE_UNAVAILABLE_TOKENS = (
@@ -67,6 +74,16 @@ class SpcOnlineUnavailableError(RuntimeError):
     pass
 
 
+class SpcAlreadyArchivedError(RuntimeError):
+    def __init__(self, result: schemas.UrlCheckResult) -> None:
+        super().__init__("already archived")
+        self.result = result
+
+
+def spc_reading_url(standard_no: str) -> str:
+    return f"spc-online-reading://{standard_no.strip()}"
+
+
 def _json_get(url: str) -> Any:
     with urllib.request.urlopen(url, timeout=10) as response:
         return json.loads(response.read().decode("utf-8"))
@@ -76,27 +93,6 @@ def _json_put(url: str) -> Any:
     request = urllib.request.Request(url, data=b"", method="PUT")
     with urllib.request.urlopen(request, timeout=10) as response:
         return json.loads(response.read().decode("utf-8"))
-
-
-def _find_target(cdp_url: str, detail_url: str | None) -> dict[str, Any] | None:
-    targets = _json_get(f"{cdp_url.rstrip('/')}/json/list")
-    pages = [target for target in targets if target.get("type") == "page"]
-    if detail_url:
-        for target in pages:
-            if target.get("url") == detail_url:
-                return target
-        for target in pages:
-            if detail_url.rsplit("/", 1)[-1] in target.get("url", ""):
-                return target
-    for target in pages:
-        if target.get("url", "").startswith(SPC_BASE_URL):
-            return target
-    return pages[0] if pages else None
-
-
-def _open_target(cdp_url: str, url: str) -> dict[str, Any]:
-    encoded = urllib.parse.quote(url, safe="")
-    return _json_put(f"{cdp_url.rstrip('/')}/json/new?{encoded}")
 
 
 def _content_disposition_file_name(standard_no: str) -> str:
@@ -120,6 +116,88 @@ def _safe_content_disposition(content_disposition: str | None, standard_no: str)
     return f'form-data; name="attachment"; filename="{safe_name}"'
 
 
+def find_archived_result(db, standard_no: str) -> schemas.UrlCheckResult | None:
+    source = db.query(models.UrlSource).filter(models.UrlSource.url == spc_reading_url(standard_no)).first()
+    if source is None:
+        return None
+    version = (
+        db.query(models.DocumentVersion)
+        .filter(models.DocumentVersion.url_source_id == source.id, models.DocumentVersion.is_current.is_(True))
+        .order_by(models.DocumentVersion.id.desc())
+        .first()
+    )
+    if version is None:
+        return None
+    return schemas.UrlCheckResult(
+        source_id=source.id,
+        url=source.url,
+        ok=True,
+        status_code=200,
+        result="无变化",
+        message="已入库，跳过重复采集",
+        document_id=version.document_id,
+        version_id=version.id,
+        file_hash=version.file_hash,
+        change_type=models.ChangeType.unchanged.value,
+    )
+
+
+class SpcCdpSession:
+    def __init__(self, cdp_url: str = "http://127.0.0.1:9222", *, state_file: Path | None = None) -> None:
+        self.cdp_url = cdp_url.rstrip("/")
+        self.state_file = state_file or SPC_TAB_STATE_FILE
+        self._target: dict[str, Any] | None = None
+
+    def _load_state(self) -> dict[str, Any]:
+        if not self.state_file.exists():
+            return {}
+        try:
+            return json.loads(self.state_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _save_state(self, target: dict[str, Any]) -> None:
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"target_id": target.get("id"), "url": target.get("url")}
+        self.state_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _list_pages(self) -> list[dict[str, Any]]:
+        targets = _json_get(f"{self.cdp_url}/json/list")
+        return [target for target in targets if target.get("type") == "page"]
+
+    def get_target(self) -> dict[str, Any]:
+        if self._target is not None:
+            return self._target
+
+        pages = self._list_pages()
+        saved_id = self._load_state().get("target_id")
+        if saved_id:
+            for page in pages:
+                if page.get("id") == saved_id:
+                    self._target = page
+                    return page
+
+        for page in pages:
+            url = page.get("url") or ""
+            if url.startswith(SPC_BASE_URL):
+                self._target = page
+                self._save_state(page)
+                return page
+
+        target = _json_put(f"{self.cdp_url}/json/new?{urllib.parse.quote(SPC_BASE_URL + '/', safe='')}")
+        self._target = target
+        self._save_state(target)
+        return target
+
+    @property
+    def websocket_url(self) -> str:
+        target = self.get_target()
+        websocket_url = target.get("webSocketDebuggerUrl")
+        if not websocket_url:
+            raise RuntimeError("Chrome target has no websocket debugger URL")
+        return websocket_url
+
+
 async def _capture_pdf_from_page(
     websocket_url: str,
     standard_no: str,
@@ -129,13 +207,9 @@ async def _capture_pdf_from_page(
 ) -> DownloadedContent:
     next_id = 1
     pending: dict[int, asyncio.Future] = {}
-    online_url: str | None = None
-    online_status: int | None = None
-    online_content_type: str | None = None
-    online_content_disposition: str | None = None
 
     async with websockets.connect(websocket_url, max_size=100_000_000) as ws:
-        async def send_later(method: str, params: dict[str, Any] | None = None) -> None:
+        async def send_later(method: str, params: dict[str, Any] | None = None) -> int:
             nonlocal next_id
             msg = {"id": next_id, "method": method}
             if params is not None:
@@ -163,17 +237,16 @@ async def _capture_pdf_from_page(
         await send_later("Page.navigate", {"url": detail_url})
 
         submitted = False
-        online_loaded = False
         deadline = time.time() + timeout_seconds
         while time.time() < deadline:
             try:
                 raw = await asyncio.wait_for(ws.recv(), timeout=1)
             except asyncio.TimeoutError:
+                await send_later(
+                    "Runtime.evaluate",
+                    {"expression": ONLINE_UNAVAILABLE_CHECK_EXPRESSION, "returnByValue": True},
+                )
                 if not submitted:
-                    await send_later(
-                        "Runtime.evaluate",
-                        {"expression": ONLINE_UNAVAILABLE_CHECK_EXPRESSION, "returnByValue": True},
-                    )
                     expr = f"""(() => {{
                       const form = document.querySelector('#stdonline');
                       if (!form) return {{submitted:false, reason:'no #stdonline', readyState:document.readyState, url:location.href, text:document.body ? document.body.innerText.slice(0,500) : ''}};
@@ -188,18 +261,11 @@ async def _capture_pdf_from_page(
                       return {{submitted:true, url:location.href, a100:a100 && a100.value, standclass:standclass && standclass.value}};
                     }})()"""
                     await send_later("Runtime.evaluate", {"expression": expr, "returnByValue": True})
-                else:
-                    await send_later(
-                        "Runtime.evaluate",
-                        {"expression": ONLINE_UNAVAILABLE_CHECK_EXPRESSION, "returnByValue": True},
-                    )
                 continue
 
             event = json.loads(raw)
             if "id" in event and event["id"] in pending:
-                future = pending.pop(event["id"])
-                if not future.done():
-                    future.set_result(event)
+                pending.pop(event["id"], None)
                 result_value = event.get("result", {}).get("result", {}).get("value")
                 if isinstance(result_value, dict):
                     if result_value.get("online_unavailable"):
@@ -259,28 +325,41 @@ async def _capture_pdf_from_page(
                     url=online_url or f"{SPC_BASE_URL}/stdlib/onlinereading",
                     content=content,
                     content_type=online_content_type or "application/pdf",
-                    content_disposition=_safe_content_disposition(
-                        online_content_disposition,
-                        standard_no,
-                    ),
+                    content_disposition=_safe_content_disposition(online_content_disposition, standard_no),
                 )
 
     raise RuntimeError("Timed out waiting for SPC online reading PDF response")
 
 
-def _upsert_url_source(db, detail_url: str, standard_no: str, title: str | None) -> models.UrlSource:
-    url = f"spc-online-reading://{standard_no}"
+def _upsert_url_source(
+    db,
+    detail_url: str,
+    standard_no: str,
+    title: str | None,
+    *,
+    resource_id: int | None = None,
+) -> models.UrlSource:
+    url = spc_reading_url(standard_no)
     source = db.query(models.UrlSource).filter(models.UrlSource.url == url).first()
     if source is None:
         source = models.UrlSource(url=url)
         db.add(source)
-        db.flush()
+        try:
+            db.flush()
+        except IntegrityError:
+            db.rollback()
+            source = db.query(models.UrlSource).filter(models.UrlSource.url == url).first()
+            if source is None:
+                raise
     source.source_name = title or standard_no
     source.source_unit = "中国标准在线服务网"
     source.source_type = "SPC会员在线阅读PDF流"
     source.category = "SPC在线阅读授权文件"
     source.check_frequency = "manual"
-    source.remark = f"standard_no={standard_no}；detail_url={detail_url}；采集方式=会员在线阅读官方PDF流"
+    source.remark = (
+        f"standard_no={standard_no}; standard_resource_id={resource_id or ''}; "
+        f"detail_url={detail_url}; 采集方式=会员在线阅读官方PDF流"
+    )
     return source
 
 
@@ -290,19 +369,26 @@ def ingest_one_spc_online_file(
     detail_url: str,
     standclass: str = "CN",
     title: str | None = None,
+    resource_id: int | None = None,
     cdp_url: str = "http://127.0.0.1:9222",
     timeout_seconds: int = 240,
+    session: SpcCdpSession | None = None,
+    defer_baidu_upload: bool | None = None,
+    skip_if_archived: bool = True,
 ):
-    target = _find_target(cdp_url, detail_url)
-    if target is None:
-        target = _open_target(cdp_url, detail_url)
-    websocket_url = target.get("webSocketDebuggerUrl")
-    if not websocket_url:
-        raise SystemExit("Chrome target has no websocket debugger URL")
+    standard_no = (standard_no or "").strip()
+    with SessionLocal() as db:
+        ensure_default_settings(db)
+        if skip_if_archived:
+            existing = find_archived_result(db, standard_no)
+            if existing is not None:
+                return existing
 
+    owns_session = session is None
+    session = session or SpcCdpSession(cdp_url)
     downloaded = asyncio.run(
         _capture_pdf_from_page(
-            websocket_url=websocket_url,
+            websocket_url=session.websocket_url,
             standard_no=standard_no,
             standclass=standclass,
             detail_url=detail_url,
@@ -313,9 +399,21 @@ def ingest_one_spc_online_file(
     settings = get_settings()
     with SessionLocal() as db:
         ensure_default_settings(db)
-        source = _upsert_url_source(db, detail_url, standard_no, title)
+        if skip_if_archived:
+            existing = find_archived_result(db, standard_no)
+            if existing is not None:
+                return existing
+        source = _upsert_url_source(db, detail_url, standard_no, title, resource_id=resource_id)
         storage_root = configured_storage_root(db, settings.storage_root)
-        result = archive_downloaded_content(db, source, storage_root, downloaded)
+        if defer_baidu_upload is None:
+            defer_baidu_upload = configured_storage_backend(db) in {"dual", "baidu_pan"}
+        result = archive_downloaded_content(
+            db,
+            source,
+            storage_root,
+            downloaded,
+            defer_baidu_upload=bool(defer_baidu_upload),
+        )
     return result
 
 

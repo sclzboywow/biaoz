@@ -14,6 +14,7 @@ logs/
 .playwright-cli/
 .chrome-spc-ingest-debug/
 .chrome-spc-member-profile/
+.chrome-ttbz-ingest-debug/
 backend/data/
 backend/.venv/
 frontend/node_modules/

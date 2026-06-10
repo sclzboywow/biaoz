@@ -27,7 +27,6 @@ from app.trusted_source_adapters import TrustedSourceSyncOptions, registry  # no
 DEFAULT_ADAPTER_KEYS = {
     "samr_industry_standard_public",
     "samr_local_standard_public",
-    "samr_group_standard_public",
     "samr_enterprise_standard_public",
 }
 

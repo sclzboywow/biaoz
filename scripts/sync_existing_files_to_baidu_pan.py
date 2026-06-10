@@ -16,12 +16,21 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 from app import models  # noqa: E402
-from app.baidu_pan_storage import BaiduPanClient, BaiduPanError, is_baidu_pan_uri, load_baidu_pan_config  # noqa: E402
+from app.baidu_pan_storage import (
+    BaiduPanClient,
+    BaiduPanError,
+    append_baidu_pan_sync_remark,
+    build_baidu_pan_sync_payload,
+    is_baidu_pan_uri,
+    load_baidu_pan_config,
+    version_has_baidu_pan,
+)  # noqa: E402
 from app.config import get_settings  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
-from app.download_service import archive_object_relative_path  # noqa: E402
+from app.download_service import archive_object_relative_path, configured_storage_backend  # noqa: E402
 from app.settings_store import ensure_default_settings, get_setting  # noqa: E402
 from app.storage import configured_storage_root  # noqa: E402
+from sqlalchemy import or_  # noqa: E402
 
 
 def sanitize_error(value: object) -> str:
@@ -53,15 +62,30 @@ def resolve_local_file(db, raw_file_path: str) -> Path | None:
 
 def pending_version_ids(limit: int | None, current_only: bool, version_ids: list[int] | None = None) -> list[int]:
     with SessionLocal() as db:
-        query = db.query(models.DocumentVersion.id).filter(~models.DocumentVersion.file_path.like("baidupan:%"))
+        query = db.query(models.DocumentVersion.id, models.DocumentVersion.file_path, models.DocumentVersion.remark)
         if version_ids:
             query = query.filter(models.DocumentVersion.id.in_(version_ids))
         if current_only:
             query = query.filter(models.DocumentVersion.is_current.is_(True))
-        query = query.order_by(models.DocumentVersion.id)
+        query = query.filter(~models.DocumentVersion.file_path.like("baidupan:%"))
+        # Prefer rows that still lack a successful baidu_pan_sync remote_uri marker.
+        query = query.filter(
+            or_(
+                models.DocumentVersion.remark.is_(None),
+                ~models.DocumentVersion.remark.like("%remote_uri%baidupan:%"),
+            )
+        )
+        query = query.order_by(models.DocumentVersion.id.asc())
         if limit:
-            query = query.limit(limit)
-        return [row[0] for row in query.all()]
+            query = query.limit(limit * 3)
+        pending: list[int] = []
+        for version_id, file_path, remark in query.all():
+            if version_has_baidu_pan(file_path=file_path, remark=remark):
+                continue
+            pending.append(version_id)
+            if limit and len(pending) >= limit:
+                break
+        return pending
 
 
 def append_sync_remark(existing: str | None, payload: dict) -> str:
@@ -75,7 +99,7 @@ def sync_one(version_id: int, *, verify_mode: str, update_db: bool) -> dict:
         version = db.get(models.DocumentVersion, version_id)
         if version is None:
             return {"version_id": version_id, "ok": False, "status": "missing_version"}
-        if is_baidu_pan_uri(version.file_path):
+        if version_has_baidu_pan(file_path=version.file_path, remark=version.remark):
             return {"version_id": version_id, "ok": True, "status": "already_remote"}
         local_path = resolve_local_file(db, version.file_path)
         if local_path is None:
@@ -140,28 +164,35 @@ def sync_one(version_id: int, *, verify_mode: str, update_db: bool) -> dict:
 
     if update_db:
         with SessionLocal() as db:
+            ensure_default_settings(db)
             version = db.get(models.DocumentVersion, version_id)
             if version is None:
                 return {"version_id": version_id, "ok": False, "status": "missing_on_update", "remote_uri": remote_uri}
-            if not is_baidu_pan_uri(version.file_path):
+            if version_has_baidu_pan(file_path=version.file_path, remark=version.remark):
+                return {"version_id": version_id, "ok": True, "status": "already_remote", "remote_uri": remote_uri}
+            storage_backend = configured_storage_backend(db)
+            sync_payload = build_baidu_pan_sync_payload(
+                remote_result=remote,
+                file_hash=file_hash,
+                source="backfill_sync",
+            )
+            sync_payload.update(
+                {
+                    "verified_at": datetime.now(UTC).isoformat(),
+                    "original_file_path": original_file_path,
+                    "md5": local_md5,
+                    "verify_mode": verify_mode,
+                    "verification": verification,
+                }
+            )
+            version.file_hash = file_hash
+            version.content_hash = file_hash
+            if storage_backend == "dual" and original_file_path and not is_baidu_pan_uri(original_file_path):
+                version.remark = append_baidu_pan_sync_remark(version.remark, sync_payload)
+            else:
                 version.file_path = remote_uri
-                version.file_hash = file_hash
-                version.content_hash = file_hash
-                version.remark = append_sync_remark(
-                    version.remark,
-                    {
-                        "verified_at": datetime.now(UTC).isoformat(),
-                        "original_file_path": original_file_path,
-                        "remote_path": remote.path,
-                        "fs_id": remote.fs_id,
-                        "sha256": file_hash,
-                        "md5": local_md5,
-                        "size": local_size,
-                        "verify_mode": verify_mode,
-                        "verification": verification,
-                    },
-                )
-                db.commit()
+                version.remark = append_baidu_pan_sync_remark(version.remark, sync_payload)
+            db.commit()
 
     return {
         "version_id": version_id,

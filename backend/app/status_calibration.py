@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from difflib import SequenceMatcher
 
 from sqlalchemy import or_, select
@@ -100,6 +101,44 @@ def match_resource_to_documents(db: Session, resource: models.StandardResource) 
 
     resource.matched_document_count = len(matches)
     return matches
+
+
+def extract_standard_resource_id_from_remark(remark: str | None) -> int | None:
+    text = remark or ""
+    match = re.search(r"standard_resource_id\s*=\s*(\d+)", text, flags=re.I)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def link_archived_document_to_resources(db: Session, *, document: models.Document, source: models.UrlSource) -> int:
+    """After a file is archived, link Document <-> StandardResource and refresh matched_document_count."""
+    linked_resources: list[models.StandardResource] = []
+    resource_id = extract_standard_resource_id_from_remark(source.remark)
+    if resource_id:
+        resource = db.get(models.StandardResource, resource_id)
+        if resource is not None:
+            linked_resources.append(resource)
+
+    standard_no = (_document_number(document) or document.standard_no or "").strip()
+    if standard_no:
+        for resource in db.scalars(
+            select(models.StandardResource).where(
+                or_(
+                    models.StandardResource.standard_no == standard_no,
+                    models.StandardResource.normalized_standard_no == standard_no,
+                )
+            )
+        ):
+            if resource not in linked_resources:
+                linked_resources.append(resource)
+
+    linked = 0
+    for resource in linked_resources:
+        calibration = calibrate_resource_status(db, resource)
+        if calibration["matches"]:
+            linked += 1
+    return linked
 
 
 def calibrate_resource_status(db: Session, resource: models.StandardResource) -> dict[str, int]:

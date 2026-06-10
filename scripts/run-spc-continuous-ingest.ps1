@@ -55,7 +55,9 @@ do {
             "--category", $category,
             "--limit", [string]$FileLimit,
             "--delay", [string]$FileDelay,
-            "--timeout", "300"
+            "--timeout", "300",
+            "--max-consecutive-errors", "8",
+            "--defer-baidu-upload"
         )
     }
 

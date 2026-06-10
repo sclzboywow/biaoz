@@ -22,12 +22,10 @@ $textLog = Join-Path $logDir "ingest-monitor.log"
 $jsonlLog = Join-Path $logDir "ingest-monitor.jsonl"
 
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+. (Join-Path $PSScriptRoot "loop-pid-utils.ps1")
 
 function Get-MonitorPid {
-    if (-not (Test-Path $pidFile)) { return $null }
-    $raw = (Get-Content -Path $pidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
-    if (-not $raw) { return $null }
-    try { return [int]$raw.Trim() } catch { return $null }
+    return Read-LoopPidFile -Path $pidFile
 }
 
 function Write-MonitorLog {
@@ -98,7 +96,7 @@ if ($Background) {
         -RedirectStandardError $errLog `
         -WindowStyle Hidden `
         -PassThru
-    Set-Content -Path $pidFile -Value $proc.Id -Encoding utf8
+    Write-LoopPidFile -Path $pidFile -ProcessId $proc.Id
     Write-Output "Ingest monitor started pid=$($proc.Id) interval=${IntervalMinutes}m"
     Write-Output "text log: $textLog"
     Write-Output "jsonl log: $jsonlLog"
@@ -108,6 +106,18 @@ if ($Background) {
 Write-MonitorLog "ingest monitor starting interval=${IntervalMinutes}m"
 
 do {
+    Write-MonitorLog "revive dead ingest loops"
+    try {
+        & (Join-Path $PSScriptRoot "run-all-ingest-file-loops.ps1") | ForEach-Object { Write-MonitorLog $_ }
+    } catch {
+        Write-MonitorLog "revive file loops failed: $($_.Exception.Message)"
+    }
+    try {
+        & (Join-Path $PSScriptRoot "run-all-metadata-loops.ps1") | ForEach-Object { Write-MonitorLog $_ }
+    } catch {
+        Write-MonitorLog "revive metadata loops failed: $($_.Exception.Message)"
+    }
+
     Write-MonitorLog "report begin"
     try {
         Invoke-IngestReport | Out-Null

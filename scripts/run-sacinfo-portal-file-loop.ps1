@@ -1,10 +1,10 @@
 param(
     [ValidateSet("industry", "local", "all")]
     [string]$Platform = "all",
-    [int]$FileLimit = 10,
+    [int]$FileLimit = 1000,
     [double]$FileDelay = 3.0,
     [int]$FileTimeoutSeconds = 60,
-    [int]$CycleSleepSeconds = 120,
+    [int]$CycleSleepSeconds = 30,
     [int]$MaxAttempts = 3,
     [switch]$Once
 )
@@ -18,6 +18,14 @@ $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $python = Join-Path $repoRoot "backend\.venv\Scripts\python.exe"
 $logDir = Join-Path $repoRoot "logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+$loopSlug = switch ($Platform) {
+    "industry" { "sacinfo-portal-industry-file-loop" }
+    "local" { "sacinfo-portal-local-file-loop" }
+    default { "sacinfo-portal-file-loop" }
+}
+$pidFile = Join-Path $logDir "$loopSlug.pid"
+. (Join-Path $PSScriptRoot "loop-pid-utils.ps1")
+Write-LoopPidFile -Path $pidFile -ProcessId $PID
 
 function Get-SacinfoCursorPath {
     param([string]$Name)
@@ -65,6 +73,7 @@ if ($Platform -eq "all") {
 
 Write-SacinfoLog "sacinfo portal captcha file loop starting platforms=$($platforms -join ',') file_limit=$FileLimit"
 
+try {
 do {
     foreach ($platform in $platforms) {
         $cursor = Get-SacinfoCursor -Name $platform
@@ -83,6 +92,7 @@ do {
             --delay $FileDelay `
             --timeout $FileTimeoutSeconds `
             --max-attempts $MaxAttempts `
+            --defer-baidu-upload `
             @cursorArg 2>&1
         $output | ForEach-Object { Write-Output $_ }
         Update-SacinfoCursorFromOutput -Name $platform -OutputLines $output
@@ -93,5 +103,8 @@ do {
     Write-SacinfoLog "cycle complete sleep=${CycleSleepSeconds}s"
     Start-Sleep -Seconds $CycleSleepSeconds
 } while ($true)
+} finally {
+    Remove-LoopPidFileIfOwned -Path $pidFile -ProcessId $PID
+}
 
 Write-SacinfoLog "sacinfo portal captcha file loop stopped"

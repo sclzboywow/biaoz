@@ -73,6 +73,73 @@ def parse_baidu_pan_uri(value: str) -> tuple[str, str | None]:
     return path, fs_id
 
 
+BAIDU_PAN_SYNC_PREFIX = "baidu_pan_sync="
+
+
+def append_baidu_pan_sync_remark(existing: str | None, payload: dict) -> str:
+    line = BAIDU_PAN_SYNC_PREFIX + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return (existing.rstrip() + "\n" + line) if existing else line
+
+
+def iter_baidu_pan_sync_entries(remark: str | None) -> list[dict]:
+    if not remark:
+        return []
+    entries: list[dict] = []
+    for line in remark.splitlines():
+        if not line.startswith(BAIDU_PAN_SYNC_PREFIX):
+            continue
+        raw = line[len(BAIDU_PAN_SYNC_PREFIX) :]
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            entries.append(payload)
+    return entries
+
+
+def latest_baidu_pan_sync(remark: str | None) -> dict | None:
+    entries = iter_baidu_pan_sync_entries(remark)
+    return entries[-1] if entries else None
+
+
+def baidu_pan_remote_uri(file_path: str | None, remark: str | None) -> str | None:
+    if is_baidu_pan_uri(file_path):
+        return file_path
+    latest = latest_baidu_pan_sync(remark)
+    if not latest or latest.get("status") == "failed":
+        return None
+    remote_uri = latest.get("remote_uri")
+    return str(remote_uri) if remote_uri else None
+
+
+def version_has_baidu_pan(*, file_path: str | None, remark: str | None) -> bool:
+    return baidu_pan_remote_uri(file_path, remark) is not None
+
+
+def build_baidu_pan_sync_payload(
+    *,
+    remote_result: BaiduPanUploadResult,
+    file_hash: str,
+    status: str = "synced",
+    source: str = "async_upload",
+    error: str | None = None,
+) -> dict:
+    payload = {
+        "status": status,
+        "synced_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "remote_uri": remote_result.uri,
+        "remote_path": remote_result.path,
+        "fs_id": remote_result.fs_id,
+        "sha256": file_hash,
+        "size": remote_result.size,
+        "source": source,
+    }
+    if error:
+        payload["error"] = error[:1000]
+    return payload
+
+
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 

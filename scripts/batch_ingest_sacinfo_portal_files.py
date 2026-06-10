@@ -13,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 BACKEND = ROOT / "backend"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
+if str(ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(ROOT / "scripts"))
 os.chdir(BACKEND)
 
 import httpx
@@ -24,6 +26,7 @@ from app import models
 from app.config import get_settings
 from app.database import SessionLocal
 from app.download_service import archive_downloaded_content
+from baidu_upload_batch import add_baidu_upload_args, init_baidu_upload_workers, log_baidu_upload_summary  # noqa: E402
 from app.samr_portal_captcha_download import (
     SamrPortalCaptchaError,
     SamrPortalCaptchaIncorrectError,
@@ -203,6 +206,7 @@ def ingest_one(
     timeout_seconds: int,
     max_attempts: int,
     client: httpx.Client,
+    defer_baidu_upload: bool,
 ) -> dict:
     downloaded = download_sacinfo_portal_pdf(
         candidate.base_url,
@@ -219,7 +223,13 @@ def ingest_one(
             return {"ok": False, "status": "missing_resource"}
         url_source = _create_or_get_url_source(db, candidate.canonical_url, resource, source_name)
         storage_root = configured_storage_root(db, settings.storage_root)
-        result = archive_downloaded_content(db, url_source, storage_root, downloaded)
+        result = archive_downloaded_content(
+            db,
+            url_source,
+            storage_root,
+            downloaded,
+            defer_baidu_upload=defer_baidu_upload,
+        )
         if result.ok:
             resource.sync_status = "已同步"
             resource.last_synced_at = datetime.now(UTC)
@@ -241,6 +251,7 @@ def main() -> int:
     parser.add_argument("--max-attempts", type=int, default=int(os.getenv("SACINFO_CAPTCHA_MAX_ATTEMPTS", "3")))
     parser.add_argument("--failure-cooldown-hours", type=float, default=2.0)
     parser.add_argument("--max-consecutive-errors", type=int, default=5)
+    add_baidu_upload_args(parser)
     args = parser.parse_args()
 
     adapter_key = args.adapter_key
@@ -265,6 +276,7 @@ def main() -> int:
     if args.dry_run or not candidates:
         return 0
 
+    init_baidu_upload_workers(args)
     ok_count = 0
     error_count = 0
     consecutive_errors = 0
@@ -278,6 +290,7 @@ def main() -> int:
                     timeout_seconds=args.timeout,
                     max_attempts=args.max_attempts,
                     client=client,
+                    defer_baidu_upload=args.defer_baidu_upload,
                 )
                 ok = bool(payload.get("ok"))
                 ok_count += 1 if ok else 0
@@ -382,6 +395,7 @@ def main() -> int:
                     ),
                     flush=True,
                 )
+                log_baidu_upload_summary("sacinfo", args)
                 return 1
 
             if args.delay > 0 and index < len(candidates):
@@ -401,6 +415,7 @@ def main() -> int:
         ),
         flush=True,
     )
+    log_baidu_upload_summary("sacinfo", args)
     return 0 if error_count == 0 else 1
 
 

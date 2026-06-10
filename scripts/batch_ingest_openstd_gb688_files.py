@@ -13,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 BACKEND = ROOT / "backend"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
+if str(ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(ROOT / "scripts"))
 os.chdir(BACKEND)
 
 import httpx
@@ -22,6 +24,7 @@ from app import models
 from app.config import get_settings
 from app.database import SessionLocal
 from app.download_service import archive_downloaded_content
+from baidu_upload_batch import add_baidu_upload_args, init_baidu_upload_workers, log_baidu_upload_summary  # noqa: E402
 from app.gb688_captcha_download import (
     Gb688CaptchaError,
     Gb688CaptchaIncorrectError,
@@ -180,7 +183,14 @@ def _create_or_get_url_source(db, url: str, resource: models.StandardResource) -
     return source
 
 
-def ingest_one(candidate: Candidate, *, timeout_seconds: int, max_attempts: int, client: httpx.Client) -> dict:
+def ingest_one(
+    candidate: Candidate,
+    *,
+    timeout_seconds: int,
+    max_attempts: int,
+    client: httpx.Client,
+    defer_baidu_upload: bool,
+) -> dict:
     downloaded = download_gb688_pdf(
         candidate.hcno,
         timeout_seconds=timeout_seconds,
@@ -195,7 +205,13 @@ def ingest_one(candidate: Candidate, *, timeout_seconds: int, max_attempts: int,
             return {"ok": False, "status": "missing_resource"}
         url_source = _create_or_get_url_source(db, candidate.download_url, resource)
         storage_root = configured_storage_root(db, settings.storage_root)
-        result = archive_downloaded_content(db, url_source, storage_root, downloaded)
+        result = archive_downloaded_content(
+            db,
+            url_source,
+            storage_root,
+            downloaded,
+            defer_baidu_upload=defer_baidu_upload,
+        )
         if result.ok:
             resource.sync_status = "已同步"
             resource.last_synced_at = datetime.now(UTC)
@@ -215,6 +231,7 @@ def main() -> int:
     parser.add_argument("--max-attempts", type=int, default=int(os.getenv("GB688_CAPTCHA_MAX_ATTEMPTS", "3")))
     parser.add_argument("--failure-cooldown-hours", type=float, default=2.0)
     parser.add_argument("--max-consecutive-errors", type=int, default=5)
+    add_baidu_upload_args(parser)
     args = parser.parse_args()
 
     source_id = args.source_id or openstd_source_id()
@@ -229,6 +246,7 @@ def main() -> int:
     if args.dry_run or not candidates:
         return 0
 
+    init_baidu_upload_workers(args)
     ok_count = 0
     error_count = 0
     consecutive_errors = 0
@@ -236,7 +254,13 @@ def main() -> int:
     with httpx.Client(follow_redirects=True, timeout=args.timeout) as client:
         for index, item in enumerate(candidates, start=1):
             try:
-                payload = ingest_one(item, timeout_seconds=args.timeout, max_attempts=args.max_attempts, client=client)
+                payload = ingest_one(
+                    item,
+                    timeout_seconds=args.timeout,
+                    max_attempts=args.max_attempts,
+                    client=client,
+                    defer_baidu_upload=args.defer_baidu_upload,
+                )
                 ok = bool(payload.get("ok"))
                 ok_count += 1 if ok else 0
                 error_count += 0 if ok else 1
@@ -326,6 +350,7 @@ def main() -> int:
                     ),
                     flush=True,
                 )
+                log_baidu_upload_summary("openstd", args)
                 return 1
 
             if args.delay > 0 and index < len(candidates):
@@ -336,6 +361,7 @@ def main() -> int:
         + json.dumps({"ok": ok_count, "errors": error_count, "total": len(candidates), "last_resource_id": last_resource_id}, ensure_ascii=False),
         flush=True,
     )
+    log_baidu_upload_summary("openstd", args)
     return 0 if error_count == 0 else 1
 
 

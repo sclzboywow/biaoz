@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app import models, schemas
 from app.alerts import mark_alert_auto_handled
-from app.baidu_pan_storage import BaiduPanClient, BaiduPanError, load_baidu_pan_config
+from app.baidu_pan_storage import BaiduPanClient, BaiduPanError, append_baidu_pan_sync_remark, build_baidu_pan_sync_payload, load_baidu_pan_config
 from app.standard_number import normalize_standard_no
 from app.storage import check_storage_root, relative_storage_path
 from app.settings_store import get_setting
@@ -41,6 +41,17 @@ class DownloadFailure:
     alert_type: str = "下载失败"
 
 
+def safe_archive_file_stem(value: str, *, fallback: str = "document") -> str:
+    cleaned = re.sub(r'[<>:"/\\|?*\r\n\t]+', " ", value or "")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .-_")
+    return cleaned or fallback
+
+
+def archive_content_disposition(file_stem: str, *, suffix: str = ".pdf") -> str:
+    safe_stem = safe_archive_file_stem(file_stem, fallback="document")
+    return f'attachment; filename="{safe_stem}{suffix}"'
+
+
 def guess_file_name(url: str, content_type: str | None, content_disposition: str | None) -> str:
     if content_disposition:
         match = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?', content_disposition, flags=re.I)
@@ -48,7 +59,7 @@ def guess_file_name(url: str, content_type: str | None, content_disposition: str
             return Path(unquote(match.group(1))).name
 
     parsed = urlparse(url)
-    name = Path(unquote(parsed.path)).name
+    name = Path(unquote(parsed.path)).name.replace("+", " ")
     if name and "." in name:
         return name
 
@@ -234,6 +245,8 @@ def archive_downloaded_content(
     source: models.UrlSource,
     storage_root: Path,
     downloaded: DownloadedContent,
+    *,
+    defer_baidu_upload: bool = False,
 ) -> schemas.UrlCheckResult:
     storage_backend = configured_storage_backend(db)
     needs_local_storage = storage_backend in {"local", "dual"}
@@ -333,13 +346,24 @@ def archive_downloaded_content(
 
     relative_path = archive_relative_path(source.id, file_name)
     storage_path = ""
+    queued_baidu_upload = False
+    baidu_sync_payload: dict | None = None
     if storage_backend in {"baidu_pan", "dual"}:
-        try:
-            remote_relative_path = archive_object_relative_path(file_hash, file_name)
-            remote_result = BaiduPanClient(load_baidu_pan_config(db)).upload_bytes(downloaded.content, remote_relative_path)
-            storage_path = remote_result.uri
-        except BaiduPanError as exc:
-            return record_download_failure(db, source, DownloadFailure(None, f"百度网盘归档失败：{exc}", "远端存储失败"))
+        if defer_baidu_upload:
+            queued_baidu_upload = True
+        else:
+            try:
+                remote_relative_path = archive_object_relative_path(file_hash, file_name)
+                remote_result = BaiduPanClient(load_baidu_pan_config(db)).upload_bytes(downloaded.content, remote_relative_path)
+                baidu_sync_payload = build_baidu_pan_sync_payload(
+                    remote_result=remote_result,
+                    file_hash=file_hash,
+                    source="inline_upload",
+                )
+                if storage_backend == "baidu_pan":
+                    storage_path = remote_result.uri
+            except BaiduPanError as exc:
+                return record_download_failure(db, source, DownloadFailure(None, f"百度网盘归档失败：{exc}", "远端存储失败"))
 
     if needs_local_storage:
         if storage_status is None or not storage_status.available:
@@ -349,8 +373,7 @@ def archive_downloaded_content(
                 DownloadFailure(None, "本地存储不可用，无法归档文件", "存储目录不可用"),
             )
         target_path = write_archive_file(storage_status.root, source.id, file_name, downloaded.content)
-        if not storage_path:
-            storage_path = relative_storage_path(storage_status.root, target_path)
+        storage_path = relative_storage_path(storage_status.root, target_path)
 
     version_count = len(document.versions) + 1
     version = models.DocumentVersion(
@@ -364,6 +387,7 @@ def archive_downloaded_content(
         content_hash=file_hash,
         change_type=change_type,
         is_current=True,
+        remark=append_baidu_pan_sync_remark(None, baidu_sync_payload) if baidu_sync_payload else None,
     )
     db.add(version)
     db.flush()
@@ -385,8 +409,20 @@ def archive_downloaded_content(
     alert_level = models.AlertLevel.high.value if change_type == models.ChangeType.updated.value else models.AlertLevel.medium.value
     alert = create_alert(db, source, alert_type, message, alert_level, document.id)
     log_check(db, source, downloaded.status_code, change_type, message)
+    from app.status_calibration import link_archived_document_to_resources
+
+    link_archived_document_to_resources(db, document=document, source=source)
     db.commit()
     db.refresh(version)
+    if queued_baidu_upload:
+        from app.baidu_upload_queue import get_baidu_upload_queue
+
+        get_baidu_upload_queue().submit(
+            version_id=version.id,
+            file_hash=file_hash,
+            file_name=file_name,
+            content=downloaded.content,
+        )
     db.refresh(alert)
 
     return schemas.UrlCheckResult(

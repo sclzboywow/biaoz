@@ -1,11 +1,12 @@
 param(
-    [int]$Pages = 20,
+    [int]$Pages = 50,
     [int]$Workers = 2,
     [int]$CycleSleepSeconds = 900,
     [int[]]$SourceId = @(),
     [switch]$NoDetail,
     [switch]$OnlyPendingCategories,
-    [switch]$IncludeGb
+    [switch]$IncludeGb,
+    [switch]$Once
 )
 
 $ErrorActionPreference = "Continue"
@@ -46,6 +47,9 @@ while ($true) {
     Write-TrustedLog "trusted sources start"
     & $python @args
     Write-TrustedLog "trusted sources finish exit=$LASTEXITCODE"
+    if ($Once) {
+        break
+    }
     Write-TrustedLog "trusted sources cycle complete sleep=${CycleSleepSeconds}s"
     Start-Sleep -Seconds $CycleSleepSeconds
 }

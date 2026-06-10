@@ -203,8 +203,8 @@ def ensure_default_trusted_sources(db: Session) -> None:
             "is_status_authority": True,
             "crawl_mode": "独立平台公开查询接口",
             "crawl_frequency": "weekly",
-            "enabled": True,
-            "remark": "全国标准信息公共服务平台导航的团体标准信息平台，作为独立可信源采集，使用独立限速和游标。",
+            "enabled": False,
+            "remark": "全国标准信息公共服务平台导航的团体标准信息平台；正文采集已停用（会员账户锁定）。",
         },
         {
             "source_name": "企业标准信息公共服务平台",

@@ -1,8 +1,8 @@
 param(
-    [int]$FileLimit = 10,
-    [double]$FileDelay = 3.0,
-    [int]$FileTimeoutSeconds = 60,
-    [int]$CycleSleepSeconds = 120,
+    [int]$FileLimit = 1000,
+    [double]$FileDelay = 2.0,
+    [int]$FileTimeoutSeconds = 90,
+    [int]$CycleSleepSeconds = 30,
     [int]$MaxAttempts = 3,
     [switch]$Once
 )
@@ -11,12 +11,16 @@ $ErrorActionPreference = "Continue"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 $env:PYTHONIOENCODING = "utf-8"
+$env:PYTHONUNBUFFERED = "1"
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $python = Join-Path $repoRoot "backend\.venv\Scripts\python.exe"
 $logDir = Join-Path $repoRoot "logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $cursorFile = Join-Path $logDir "openstd-file-loop.cursor"
+$pidFile = Join-Path $logDir "openstd-file-loop.pid"
+. (Join-Path $PSScriptRoot "loop-pid-utils.ps1")
+Write-LoopPidFile -Path $pidFile -ProcessId $PID
 
 function Write-OpenstdLog {
     param([string]$Message)
@@ -50,6 +54,7 @@ function Update-OpenstdCursorFromOutput {
 
 Write-OpenstdLog "openstd GB688 file loop starting file_limit=$FileLimit timeout=$FileTimeoutSeconds"
 
+try {
 do {
     $cursor = Get-OpenstdCursor
     $cursorArg = @()
@@ -66,6 +71,7 @@ do {
         --delay $FileDelay `
         --timeout $FileTimeoutSeconds `
         --max-attempts $MaxAttempts `
+        --defer-baidu-upload `
         @cursorArg 2>&1
     $output | ForEach-Object { Write-Output $_ }
     Update-OpenstdCursorFromOutput -OutputLines $output
@@ -75,5 +81,8 @@ do {
     Write-OpenstdLog "cycle complete sleep=${CycleSleepSeconds}s"
     Start-Sleep -Seconds $CycleSleepSeconds
 } while ($true)
+} finally {
+    Remove-LoopPidFileIfOwned -Path $pidFile -ProcessId $PID
+}
 
 Write-OpenstdLog "openstd GB688 file loop stopped"
