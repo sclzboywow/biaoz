@@ -61,6 +61,22 @@ services:
       api:
         condition: service_started
 
+  ocr-worker:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    command: ["python", "-m", "app.ocr_download_worker", "--poll-seconds", "10"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://biaoz:biaoz@postgres:5432/biaoz}
+      STORAGE_ROOT: ${STORAGE_ROOT:-/data/standard-docs}
+    volumes:
+      - document_storage:/data/standard-docs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
+
   n8n:
     image: n8nio/n8n:1.72.1
     restart: unless-stopped
