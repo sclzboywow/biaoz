@@ -40,6 +40,16 @@ class UrlSourceUpdate(BaseModel):
 class UrlSourceOut(UrlSourceBase, OrmModel):
     id: int
     last_checked_at: datetime | None = None
+    host: str | None = None
+    url_type: str | None = None
+    file_ext: str | None = None
+    is_official_domain: bool = False
+    is_cloud_drive: bool = False
+    is_probable_pdf: bool = False
+    is_probable_detail_page: bool = False
+    source_quality_score: int | None = None
+    governance_status: str = "pending"
+    duplicate_group_key: str | None = None
     created_at: datetime
     updated_at: datetime | None = None
 
@@ -193,6 +203,11 @@ class AlertOut(AlertCreate, OrmModel):
     created_at: datetime
     handled_at: datetime | None = None
     handled_by: str | None = None
+    dedupe_key: str | None = None
+    repeat_count: int = 1
+    first_seen_at: datetime | None = None
+    last_seen_at: datetime | None = None
+    risk_level: str | None = None
 
 
 class UploadVersionResponse(DocumentVersionOut):
@@ -363,6 +378,13 @@ class TrustedSourceOut(OrmModel):
     crawl_frequency: str | None = None
     enabled: bool
     remark: str | None = None
+    source_role: str | None = None
+    domain: str | None = None
+    status_authority_weight: int | None = None
+    fulltext_weight: int | None = None
+    metadata_weight: int | None = None
+    source_health_score: int | None = None
+    governance_status: str = "pending"
 
 
 class SourceCategoryOut(OrmModel):
@@ -428,6 +450,11 @@ class StandardResourceOut(OrmModel):
     last_synced_at: datetime | None = None
     sync_status: str | None = None
     matched_document_count: int | None = None
+    auto_decision: str | None = None
+    confidence_score: int | None = None
+    decision_reason: str | None = None
+    risk_level: str | None = None
+    last_governed_at: datetime | None = None
 
 
 class StandardResourcePage(BaseModel):
@@ -611,3 +638,351 @@ class GuobiaoSyncResult(BaseModel):
     sync_logs: int = 0
     alerts: int = 0
     linked_change_logs: int = 0
+
+
+class GovernanceProfileRequest(BaseModel):
+    batch_size: int = Field(default=1000, ge=1, le=10000)
+    after_id: int = Field(default=0, ge=0)
+    only_pending: bool = True
+    include_trusted_sources: bool = True
+    create_candidates: bool = True
+
+
+class ProfileUrlSourcesRequest(BaseModel):
+    limit: int = Field(default=1000, ge=1, le=10000)
+    source_id: int | None = None
+    host: str | None = None
+    only_ungoverned: bool = True
+    dry_run: bool = False
+
+
+class RunSampleRequest(BaseModel):
+    sample_type: str = Field(
+        description="official_domains | pdf_links | cloud_drive | commercial_sites | unknown"
+    )
+    limit: int = Field(default=1000, ge=1, le=5000)
+    dry_run: bool = False
+
+
+class SourceGovernanceRunOut(OrmModel):
+    id: int
+    run_type: str
+    status: str
+    total: int
+    processed: int
+    success: int
+    failed: int
+    message: str | None = None
+    config_json: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime | None = None
+
+
+class ProfileUrlSourcesResultOut(BaseModel):
+    run_id: int | None = None
+    total: int
+    profiled: int
+    official_count: int
+    pdf_count: int
+    cloud_drive_count: int
+    duplicate_count: int
+    invalid_count: int
+    need_ocr_count: int
+    high_priority_count: int
+    clue_only_count: int
+    blacklist_candidate_count: int
+    dry_run: bool
+
+
+class SampleRunResultOut(BaseModel):
+    sample_type: str
+    scanned: int
+    run_id: int | None = None
+    total: int
+    profiled: int
+    official_count: int
+    pdf_count: int
+    cloud_drive_count: int
+    duplicate_count: int
+    invalid_count: int
+    need_ocr_count: int
+    high_priority_count: int
+    clue_only_count: int
+    blacklist_candidate_count: int
+    dry_run: bool
+
+
+class GovernanceSummaryOut(BaseModel):
+    total: int = 0
+    profiled: int = 0
+    unprofiled: int = 0
+    official_count: int = 0
+    pdf_count: int = 0
+    cloud_drive_count: int = 0
+    duplicate_count: int = 0
+    invalid_count: int = 0
+    need_ocr_count: int = 0
+    high_priority_count: int = 0
+    clue_only_count: int = 0
+    blacklist_candidate_count: int = 0
+    url_sources: dict[str, int]
+    trusted_sources: dict[str, int]
+    recent_runs: list[dict]
+
+
+class RunDecisionsRequest(BaseModel):
+    limit: int = Field(default=1000, ge=1, le=10000)
+    source_id: int | None = None
+    only_unprocessed: bool = True
+    dry_run: bool = False
+
+
+class RunDecisionsResultOut(BaseModel):
+    processed: int
+    auto_confirmed: int
+    auto_merged: int
+    auto_downgraded: int
+    auto_rejected: int
+    need_review: int
+    high_risk_count: int
+    conflict_count: int
+    dry_run: bool
+    run_id: int | None = None
+
+
+class GovernanceExceptionOut(BaseModel):
+    decision_id: int
+    resource_id: int
+    standard_no: str | None = None
+    standard_name: str
+    exception_type: str
+    risk_level: str | None = None
+    highest_source_level: str | None = None
+    highest_source_weight: int | None = None
+    conflict_sources: list[str] = Field(default_factory=list)
+    system_suggestion: str | None = None
+    handle_status: str
+    confidence_score: int | None = None
+    conflict_count: int = 0
+    decided_at: datetime | None = None
+
+
+class GovernanceExceptionPage(BaseModel):
+    total: int
+    items: list[GovernanceExceptionOut]
+    next_cursor: int | None = None
+    has_more: bool = False
+
+
+class GovernanceSupervisionSummaryOut(BaseModel):
+    pending_exceptions: int
+    high_risk_exceptions: int
+    auto_confirmed: int
+    auto_merged: int
+    auto_downgraded: int
+    pending_alerts: int
+    recent_runs: list[dict]
+
+
+class CreateOcrTasksRequest(BaseModel):
+    limit: int = Field(default=100, ge=1, le=5000)
+    source_id: int | None = None
+    only_unprocessed: bool = True
+    dry_run: bool = False
+
+
+class CreateOcrTasksResultOut(BaseModel):
+    created: int
+    skipped: int
+    scanned: int
+    dry_run: bool
+
+
+class OcrTaskDashboardOut(BaseModel):
+    pending: int
+    running: int
+    success_today: int
+    ocr_success_rate: float
+    pdf_pass_rate: float
+    failed: int
+    need_manual: int
+
+
+class OcrDownloadTaskOut(OrmModel):
+    id: int
+    resource_id: int | None = None
+    url_source_id: int | None = None
+    source_id: int | None = None
+    standard_no: str | None = None
+    standard_name: str | None = None
+    download_url: str | None = None
+    captcha_url: str | None = None
+    provider: str | None = None
+    status: str
+    priority: int
+    attempt_count: int
+    max_attempts: int
+    last_error: str | None = None
+    next_retry_at: datetime | None = None
+    locked_by: str | None = None
+    locked_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    decision_id: int | None = None
+    file_object_id: int | None = None
+    host: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class OcrDownloadTaskPage(BaseModel):
+    total: int
+    items: list[OcrDownloadTaskOut]
+    next_cursor: int | None = None
+    has_more: bool = False
+
+
+class FileObjectOut(BaseModel):
+    id: int
+    file_hash: str
+    file_size: int
+    pdf_valid: bool
+    pdf_validation_status: str | None = None
+    pdf_page_count: int | None = None
+    pdf_title: str | None = None
+    storage_backend: str | None = None
+    storage_path: str | None = None
+    local_path: str | None = None
+    baidu_pan_uri: str | None = None
+    linked_standard_count: int = 0
+    linked_source_count: int = 0
+    created_at: datetime | None = None
+
+
+class FileObjectPage(BaseModel):
+    total: int
+    items: list[FileObjectOut]
+    next_cursor: int | None = None
+    has_more: bool = False
+
+
+class GovernanceDashboardSummaryOut(BaseModel):
+    url_total: int
+    profiled_url_count: int
+    ungoverned_url_count: int
+    official_source_count: int
+    low_trust_source_count: int
+    duplicate_url_count: int
+    invalid_url_count: int
+    need_ocr_count: int
+    auto_confirmed_count: int
+    need_manual_count: int
+    ocr_success_today: int
+    pdf_invalid_today: int
+    auto_merged_count: int = 0
+    auto_downgraded_count: int = 0
+    pending_alerts: int = 0
+    distributions: dict
+
+
+class SourceHealthOut(BaseModel):
+    id: int
+    source_name: str
+    source_role: str | None = None
+    trust_level: str
+    domain: str | None = None
+    health_score: int
+    capture_success_rate: float
+    number_parse_rate: float
+    status_parse_rate: float
+    pdf_valid_rate: float
+    ocr_success_rate: float
+    duplicate_rate: float
+    conflict_rate: float
+    governance_status: str
+    enabled: bool
+    url_count: int
+    resource_count: int
+    need_ocr_count: int
+    suggested_action: str
+
+
+class SourceHealthPage(BaseModel):
+    total: int
+    items: list[SourceHealthOut]
+    next_cursor: int | None = None
+    has_more: bool = False
+
+
+class OcrTasksSummaryOut(BaseModel):
+    pending_ocr: int
+    running: int
+    archived: int
+    ocr_failed: int
+    captcha_failed: int
+    download_failed: int
+    pdf_invalid: int
+    duplicate_file: int
+    skipped: int
+    need_manual: int
+    success_today: int
+    ocr_success_rate_today: float
+    pdf_pass_rate_today: float
+    pending: int = 0
+    failed: int = 0
+    ocr_success_rate: float = 0.0
+    pdf_pass_rate: float = 0.0
+
+
+class FileObjectsSummaryOut(BaseModel):
+    total: int
+    pdf_valid: int
+    pdf_invalid: int
+    duplicate_hint: int
+    large_files: int
+    unlinked: int
+
+
+class SupervisionSummaryEnhancedOut(GovernanceSupervisionSummaryOut):
+    auto_rejected: int = 0
+    status_conflict_count: int = 0
+    file_anomaly_count: int = 0
+    ocr_anomaly_count: int = 0
+    need_review_count: int = 0
+
+
+class ProcessAuditLogOut(BaseModel):
+    id: int
+    process_name: str
+    process_type: str | None = None
+    step_name: str | None = None
+    action: str
+    target_type: str | None = None
+    target_id: int | None = None
+    source_id: int | None = None
+    status: str
+    message: str | None = None
+    confidence_score: int | None = None
+    input_summary: str | None = None
+    output_summary: str | None = None
+    error_message: str | None = None
+    created_at: datetime | None = None
+
+
+class UrlGovernanceActionRequest(BaseModel):
+    action: str
+
+
+class UrlGovernanceBatchRequest(BaseModel):
+    source_ids: list[int]
+    action: str
+
+
+class UrlGovernanceBatchResultOut(BaseModel):
+    updated: int
+    action: str
+    dry_run: bool | None = None
+    total: int | None = None
+    profiled: int | None = None

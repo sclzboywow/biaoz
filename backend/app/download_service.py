@@ -14,7 +14,8 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from app import models, schemas
-from app.alerts import mark_alert_auto_handled
+from app.alerts import create_operational_alert
+from app.governance_service import log_process_audit
 from app.baidu_pan_storage import BaiduPanClient, BaiduPanError, append_baidu_pan_sync_remark, build_baidu_pan_sync_payload, load_baidu_pan_config
 from app.standard_number import normalize_standard_no
 from app.storage import check_storage_root, relative_storage_path
@@ -130,17 +131,28 @@ def create_alert(
     message: str,
     level: str = models.AlertLevel.medium.value,
     document_id: int | None = None,
-) -> models.Alert:
-    alert = models.Alert(
-        document_id=document_id,
-        url_source_id=source.id,
+) -> models.Alert | None:
+    high_risk = level == models.AlertLevel.high.value
+    alert = create_operational_alert(
+        db,
+        source=source,
         alert_type=alert_type,
-        alert_level=level,
         message=message,
+        level=level,
+        document_id=document_id,
+        risk_level="high" if high_risk else "medium",
+        high_risk=high_risk,
     )
-    mark_alert_auto_handled(alert)
-    db.add(alert)
-    db.flush()
+    if alert is None:
+        log_process_audit(
+            db,
+            process_name="url_check",
+            action="alert_suppressed",
+            target_type="url_source",
+            target_id=source.id,
+            message=message,
+            detail={"alert_type": alert_type, "level": level, "high_risk": high_risk},
+        )
     return alert
 
 
@@ -236,7 +248,7 @@ def record_download_failure(db: Session, source: models.UrlSource, failure: Down
         status_code=failure.status_code,
         result="失败",
         message=failure.message,
-        alert_id=alert.id,
+        alert_id=alert.id if alert else None,
     )
 
 
@@ -248,6 +260,19 @@ def archive_downloaded_content(
     *,
     defer_baidu_upload: bool = False,
 ) -> schemas.UrlCheckResult:
+    from app.settings_store import get_bool_setting
+
+    if not get_bool_setting(db, "ingest_enabled", default=False):
+        return record_download_failure(
+            db,
+            source,
+            DownloadFailure(
+                None,
+                "文件入库已暂停：当前处于数据治理阶段，请完成来源画像后再开启 ingest_enabled。",
+                "入库暂停",
+            ),
+        )
+
     storage_backend = configured_storage_backend(db)
     needs_local_storage = storage_backend in {"local", "dual"}
     storage_status = check_storage_root(db, storage_root) if needs_local_storage else None
@@ -434,7 +459,7 @@ def archive_downloaded_content(
         message=message,
         document_id=document.id,
         version_id=version.id,
-        alert_id=alert.id,
+        alert_id=alert.id if alert else None,
         file_hash=file_hash,
         change_type=change_type,
     )

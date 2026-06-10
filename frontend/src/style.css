@@ -44,6 +44,13 @@ body {
   margin-bottom: 14px;
 }
 
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .filters {
   margin-bottom: 12px;
 }
@@ -177,4 +184,68 @@ body {
   .status-row {
     grid-template-columns: 1fr;
   }
+}
+
+.official-link-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.official-link-actions .el-button + .el-button {
+  margin-left: 0;
+}
+
+.raw-detail-toggle {
+  margin-top: 12px;
+}
+
+.detail-json-tabs {
+  margin-top: 12px;
+}
+
+.json-block {
+  max-height: 360px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid #dcdfe6;
+  border-radius: 6px;
+  background: #f7f8fa;
+  color: #1f2937;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.inline-alert {
+  margin-bottom: 14px;
+}
+
+.captcha-download {
+  display: grid;
+  gap: 14px;
+}
+
+.captcha-title {
+  margin: 0;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.captcha-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.captcha-image {
+  width: 132px;
+  height: 44px;
+  object-fit: contain;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  cursor: pointer;
+  background: #fff;
 }

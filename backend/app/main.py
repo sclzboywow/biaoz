@@ -17,7 +17,7 @@ from sqlalchemy import desc, func, or_, select
 from sqlalchemy.orm import Session
 
 from app import crud, models, schemas
-from app.alerts import auto_handle_pending_alerts
+from app.alerts import auto_handle_pending_alerts  # noqa: F401  # legacy helper retained
 from app.baidu_pan_storage import BaiduPanClient, BaiduPanError, is_baidu_pan_uri, load_baidu_pan_config
 from app.collection_tasks import normalize_collection_batch_size, run_url_check_task, stream_url_source_ids
 from app.config import get_settings
@@ -25,6 +25,37 @@ from app.database import SessionLocal, get_db
 from app.download_service import DownloadedContent, archive_downloaded_content
 from app.guobiao_discovery import sync_discovered_sublibs
 from app.guobiao_sync import sync_guobiao_resources  # noqa: F401  # imports and registers guobiao adapter
+from app.ocr_download_service import (
+    create_ocr_tasks_from_decisions,
+    get_file_object_detail,
+    list_file_objects_page,
+    list_ocr_tasks_page,
+    mark_ocr_task_need_manual,
+    ocr_task_dashboard,
+    retry_ocr_task,
+    skip_ocr_task,
+)
+from app.governance_dashboard_service import (
+    file_objects_summary,
+    governance_dashboard_summary,
+    list_process_audit_logs,
+    list_source_health_page,
+    ocr_tasks_summary,
+    supervision_summary_enhanced,
+)
+from app.url_governance_actions import apply_url_governance_action, batch_url_governance_actions, batch_profile_url_sources
+from app.governance_decision_service import (
+    governance_supervision_summary,
+    list_governance_exceptions,
+    run_governance_decisions,
+)
+from app.governance_service import (
+    governance_summary,
+    profile_trusted_sources,
+    profile_url_sources_batch,
+    run_sample_profiling,
+    run_url_source_profiling,
+)
 from app import samr_public_adapters  # noqa: F401  # imports and registers non-GB SAMR public adapters
 from app import spc_online_adapter  # noqa: F401  # imports and registers SPC online adapter
 from app.samr_std_sync import _download_url, _online_url, sync_samr_std_resources  # noqa: F401  # imports and registers samr adapter
@@ -59,7 +90,6 @@ async def startup() -> None:
     with SessionLocal() as db:
         ensure_default_settings(db)
         ensure_default_trusted_sources(db)
-        auto_handle_pending_alerts(db)
         check_storage_root(db, settings.storage_root)
     app.state.url_check_task = asyncio.create_task(
         run_url_check_loop(
@@ -201,6 +231,16 @@ def page_url_sources(
     status: str | None = None,
     source_type: str | None = None,
     check_frequency: str | None = None,
+    host: str | None = None,
+    url_type: str | None = None,
+    governance_status: str | None = None,
+    score_min: int | None = None,
+    score_max: int | None = None,
+    is_official_domain: bool | None = None,
+    is_cloud_drive: bool | None = None,
+    is_probable_pdf: bool | None = None,
+    need_ocr: bool | None = None,
+    is_duplicate: bool | None = None,
     db: Session = Depends(get_db),
 ):
     page_size = min(max(page_size, 1), 200)
@@ -222,12 +262,66 @@ def page_url_sources(
         filters.append(models.UrlSource.source_type == source_type)
     if check_frequency:
         filters.append(models.UrlSource.check_frequency == check_frequency)
+    if host:
+        filters.append(func.lower(models.UrlSource.host).like(f"%{host.strip().lower()}%"))
+    if url_type:
+        filters.append(models.UrlSource.url_type == url_type)
+    if governance_status:
+        filters.append(models.UrlSource.governance_status == governance_status)
+    if score_min is not None:
+        filters.append(models.UrlSource.source_quality_score >= score_min)
+    if score_max is not None:
+        filters.append(models.UrlSource.source_quality_score <= score_max)
+    if is_official_domain is not None:
+        filters.append(models.UrlSource.is_official_domain.is_(is_official_domain))
+    if is_cloud_drive is not None:
+        filters.append(models.UrlSource.is_cloud_drive.is_(is_cloud_drive))
+    if is_probable_pdf is not None:
+        filters.append(models.UrlSource.is_probable_pdf.is_(is_probable_pdf))
+    if need_ocr is not None:
+        if need_ocr:
+            filters.append(models.UrlSource.governance_status == "需 OCR")
+        else:
+            filters.append(models.UrlSource.governance_status != "需 OCR")
+    if is_duplicate is not None:
+        if is_duplicate:
+            filters.append(models.UrlSource.governance_status == "重复待合并")
+        else:
+            filters.append(models.UrlSource.governance_status != "重复待合并")
     for item in filters:
         statement = statement.where(item)
         count_statement = count_statement.where(item)
     total = db.scalar(count_statement) or 0
     items, next_cursor, has_more = cursor_window(db, statement, models.UrlSource.id, page_size, cursor)
     return schemas.UrlSourcePage(total=total, items=items, next_cursor=next_cursor, has_more=has_more)
+
+
+@api.post("/url-sources/{source_id}/governance-action", response_model=schemas.UrlSourceOut)
+def url_source_governance_action(source_id: int, payload: schemas.UrlGovernanceActionRequest, db: Session = Depends(get_db)):
+    try:
+        return apply_url_governance_action(db, source_id, payload.action)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@api.post("/url-sources/governance/batch-action", response_model=schemas.UrlGovernanceBatchResultOut)
+def url_source_governance_batch(payload: schemas.UrlGovernanceBatchRequest, db: Session = Depends(get_db)):
+    try:
+        return batch_url_governance_actions(db, payload.source_ids, payload.action)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@api.post("/url-sources/governance/batch-reprofile", response_model=schemas.UrlGovernanceBatchResultOut)
+def url_source_batch_reprofile(payload: schemas.UrlGovernanceBatchRequest, dry_run: bool = False, db: Session = Depends(get_db)):
+    result = batch_profile_url_sources(db, payload.source_ids, dry_run=dry_run)
+    return schemas.UrlGovernanceBatchResultOut(
+        updated=result["profiled"],
+        action="reprofile",
+        dry_run=result.get("dry_run"),
+        total=result.get("total"),
+        profiled=result.get("profiled"),
+    )
 
 
 @api.post("/url-sources", response_model=schemas.UrlSourceOut)
@@ -784,6 +878,235 @@ def list_trusted_sources(include_disabled: bool = False, db: Session = Depends(g
     if not include_disabled:
         statement = statement.where(models.TrustedSource.enabled.is_(True))
     return list(db.scalars(statement))
+
+
+@api.get("/dashboard/governance-summary", response_model=schemas.GovernanceDashboardSummaryOut)
+def get_dashboard_governance_summary(db: Session = Depends(get_db)):
+    ensure_default_settings(db)
+    return governance_dashboard_summary(db)
+
+
+@api.get("/governance/summary", response_model=schemas.GovernanceSummaryOut)
+@api.get("/source-governance/dashboard", response_model=schemas.GovernanceSummaryOut)
+def get_governance_summary(db: Session = Depends(get_db)):
+    ensure_default_settings(db)
+    return governance_summary(db)
+
+
+@api.post("/governance/url-sources/profile", response_model=schemas.SourceGovernanceRunOut)
+def profile_url_sources_legacy(payload: schemas.GovernanceProfileRequest, db: Session = Depends(get_db)):
+    ensure_default_settings(db)
+    if payload.include_trusted_sources:
+        profile_trusted_sources(db)
+        db.commit()
+    run = run_url_source_profiling(
+        db,
+        batch_size=payload.batch_size,
+        after_id=payload.after_id,
+        only_pending=payload.only_pending,
+        create_candidates=payload.create_candidates,
+    )
+    return run
+
+
+@api.post("/source-governance/profile-url-sources", response_model=schemas.ProfileUrlSourcesResultOut)
+def profile_url_sources_v2(payload: schemas.ProfileUrlSourcesRequest, db: Session = Depends(get_db)):
+    ensure_default_settings(db)
+    _, result = profile_url_sources_batch(
+        db,
+        limit=payload.limit,
+        source_id=payload.source_id,
+        host=payload.host,
+        only_ungoverned=payload.only_ungoverned,
+        dry_run=payload.dry_run,
+    )
+    return result
+
+
+@api.post("/source-governance/run-sample", response_model=schemas.SampleRunResultOut)
+def run_source_governance_sample(payload: schemas.RunSampleRequest, db: Session = Depends(get_db)):
+    ensure_default_settings(db)
+    try:
+        return run_sample_profiling(
+            db,
+            sample_type=payload.sample_type,
+            limit=payload.limit,
+            dry_run=payload.dry_run,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@api.post("/governance/run-decisions", response_model=schemas.RunDecisionsResultOut)
+def run_governance_decisions_api(payload: schemas.RunDecisionsRequest, db: Session = Depends(get_db)):
+    ensure_default_settings(db)
+    return run_governance_decisions(
+        db,
+        limit=payload.limit,
+        source_id=payload.source_id,
+        only_unprocessed=payload.only_unprocessed,
+        dry_run=payload.dry_run,
+    )
+
+
+@api.get("/governance/exceptions/page", response_model=schemas.GovernanceExceptionPage)
+def list_governance_exceptions_api(
+    cursor: int | None = None,
+    page_size: int = 50,
+    q: str | None = None,
+    risk_level: str | None = None,
+    db: Session = Depends(get_db),
+):
+    return list_governance_exceptions(db, cursor=cursor, page_size=page_size, q=q, risk_level=risk_level)
+
+
+@api.get("/source-governance/source-health/page", response_model=schemas.SourceHealthPage)
+def list_source_health_api(
+    cursor: int | None = None,
+    page_size: int = 50,
+    trust_level: str | None = None,
+    source_role: str | None = None,
+    governance_status: str | None = None,
+    health_min: int | None = None,
+    health_max: int | None = None,
+    enabled: bool | None = None,
+    db: Session = Depends(get_db),
+):
+    return list_source_health_page(
+        db,
+        cursor=cursor,
+        page_size=page_size,
+        trust_level=trust_level,
+        source_role=source_role,
+        governance_status=governance_status,
+        health_min=health_min,
+        health_max=health_max,
+        enabled=enabled,
+    )
+
+
+@api.get("/process-audit-logs", response_model=list[schemas.ProcessAuditLogOut])
+def list_process_audit_logs_api(
+    target_type: str | None = None,
+    target_id: int | None = None,
+    process_type: str | None = None,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    return list_process_audit_logs(
+        db,
+        target_type=target_type,
+        target_id=target_id,
+        process_type=process_type,
+        limit=limit,
+    )
+
+
+@api.get("/governance/supervision/summary", response_model=schemas.SupervisionSummaryEnhancedOut)
+def get_governance_supervision_summary(db: Session = Depends(get_db)):
+    return supervision_summary_enhanced(db)
+
+
+@api.get("/ocr-tasks/summary", response_model=schemas.OcrTasksSummaryOut)
+def get_ocr_tasks_summary(db: Session = Depends(get_db)):
+    return ocr_tasks_summary(db)
+
+
+@api.get("/file-objects/summary", response_model=schemas.FileObjectsSummaryOut)
+def get_file_objects_summary(db: Session = Depends(get_db)):
+    return file_objects_summary(db)
+
+
+@api.get("/governance/supervision/summary/legacy", response_model=schemas.GovernanceSupervisionSummaryOut)
+def get_governance_supervision_summary_legacy(db: Session = Depends(get_db)):
+    return governance_supervision_summary(db)
+
+
+@api.post("/ocr-tasks/create-from-decisions", response_model=schemas.CreateOcrTasksResultOut)
+def create_ocr_tasks_from_decisions_api(payload: schemas.CreateOcrTasksRequest, db: Session = Depends(get_db)):
+    ensure_default_settings(db)
+    return create_ocr_tasks_from_decisions(
+        db,
+        limit=payload.limit,
+        source_id=payload.source_id,
+        only_unprocessed=payload.only_unprocessed,
+        dry_run=payload.dry_run,
+    )
+
+
+@api.get("/ocr-tasks/dashboard", response_model=schemas.OcrTaskDashboardOut)
+def get_ocr_task_dashboard(db: Session = Depends(get_db)):
+    return ocr_task_dashboard(db)
+
+
+@api.get("/ocr-tasks/page", response_model=schemas.OcrDownloadTaskPage)
+def list_ocr_tasks_api(
+    cursor: int | None = None,
+    page_size: int = 50,
+    status: str | None = None,
+    q: str | None = None,
+    db: Session = Depends(get_db),
+):
+    page = list_ocr_tasks_page(db, cursor=cursor, page_size=page_size, status=status, q=q)
+    return {
+        **page,
+        "items": page["items"],
+    }
+
+
+@api.post("/ocr-tasks/{task_id}/retry", response_model=schemas.OcrDownloadTaskOut)
+def retry_ocr_task_api(task_id: int, db: Session = Depends(get_db)):
+    try:
+        return retry_ocr_task(db, task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.post("/ocr-tasks/{task_id}/skip", response_model=schemas.OcrDownloadTaskOut)
+def skip_ocr_task_api(task_id: int, db: Session = Depends(get_db)):
+    try:
+        return skip_ocr_task(db, task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.post("/ocr-tasks/{task_id}/mark-need-manual", response_model=schemas.OcrDownloadTaskOut)
+def mark_ocr_task_need_manual_api(task_id: int, db: Session = Depends(get_db)):
+    try:
+        return mark_ocr_task_need_manual(db, task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@api.get("/file-objects/page", response_model=schemas.FileObjectPage)
+def list_file_objects_api(
+    cursor: int | None = None,
+    page_size: int = 50,
+    q: str | None = None,
+    pdf_valid: bool | None = None,
+    filter_type: str | None = None,
+    db: Session = Depends(get_db),
+):
+    return list_file_objects_page(db, cursor=cursor, page_size=page_size, q=q, pdf_valid=pdf_valid, filter_type=filter_type)
+
+
+@api.get("/file-objects/{file_object_id}", response_model=schemas.FileObjectOut)
+def get_file_object_api(file_object_id: int, db: Session = Depends(get_db)):
+    detail = get_file_object_detail(db, file_object_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="文件对象不存在")
+    return detail
+
+
+@api.get("/governance/runs", response_model=list[schemas.SourceGovernanceRunOut])
+@api.get("/source-governance/runs", response_model=list[schemas.SourceGovernanceRunOut])
+def list_governance_runs(limit: int = 20, db: Session = Depends(get_db)):
+    limit = max(1, min(limit, 100))
+    return list(
+        db.scalars(
+            select(models.SourceGovernanceRun).order_by(models.SourceGovernanceRun.id.desc()).limit(limit)
+        ).all()
+    )
 
 
 @api.get("/trusted-sources/{source_id}/categories", response_model=list[schemas.SourceCategoryOut])

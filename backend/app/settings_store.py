@@ -120,6 +120,48 @@ DEFAULT_SETTINGS: dict[str, dict[str, str]] = {
         "label": "启用邮件提醒",
         "description": "V1.0 预留，后续用于邮件提醒。",
     },
+    "ingest_enabled": {
+        "value": "false",
+        "value_type": "bool",
+        "label": "启用文件入库",
+        "description": "关闭后暂停新文件归档入库（含下载归档与批量 ingest），用于数据治理阶段。",
+    },
+    "governance_mode_enabled": {
+        "value": "true",
+        "value_type": "bool",
+        "label": "数据治理模式",
+        "description": "开启后优先执行来源画像与治理流程，默认配合关闭文件入库。",
+    },
+    "ocr_download_enabled": {
+        "value": "true",
+        "value_type": "bool",
+        "label": "启用 OCR 受控下载",
+        "description": "开启后允许 OCR worker 执行高价值标准资源的受控验证码下载。",
+    },
+    "ocr_max_attempts": {
+        "value": "3",
+        "value_type": "int",
+        "label": "OCR 单任务最大尝试次数",
+        "description": "单个 OCR 下载任务允许的最大验证码/OCR 尝试次数。",
+    },
+    "ocr_host_concurrency": {
+        "value": "2",
+        "value_type": "int",
+        "label": "OCR 同 host 并发上限",
+        "description": "同一下载 host 同时运行的 OCR 任务数上限。",
+    },
+    "ocr_source_hourly_limit": {
+        "value": "20",
+        "value_type": "int",
+        "label": "OCR 单来源每小时上限",
+        "description": "同一 trusted source 每小时最多创建的 OCR 任务数。",
+    },
+    "ocr_retry_delay_seconds": {
+        "value": "300",
+        "value_type": "int",
+        "label": "OCR 失败重试间隔秒数",
+        "description": "OCR/验证码失败后延迟重试的基础秒数，会乘以 attempt_count。",
+    },
 }
 
 
@@ -248,6 +290,11 @@ def ensure_default_trusted_sources(db: Session) -> None:
             if not getattr(existing, field_name):
                 setattr(existing, field_name, value)
                 changed = True
+        if existing.domain is None or existing.governance_status == "pending":
+            from app.governance_service import derive_trusted_source_governance
+
+            derive_trusted_source_governance(existing)
+            changed = True
     if changed:
         db.commit()
 

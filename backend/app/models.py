@@ -69,6 +69,16 @@ class UrlSource(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(30), default=SourceStatus.normal.value)
     error_message: Mapped[str | None] = mapped_column(Text)
     remark: Mapped[str | None] = mapped_column(Text)
+    host: Mapped[str | None] = mapped_column(String(255), index=True)
+    url_type: Mapped[str | None] = mapped_column(String(40), index=True)
+    file_ext: Mapped[str | None] = mapped_column(String(20), index=True)
+    is_official_domain: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    is_cloud_drive: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    is_probable_pdf: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    is_probable_detail_page: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    source_quality_score: Mapped[int | None] = mapped_column(Integer, index=True)
+    governance_status: Mapped[str] = mapped_column(String(40), default="pending", index=True)
+    duplicate_group_key: Mapped[str | None] = mapped_column(String(64), index=True)
 
     versions: Mapped[list["DocumentVersion"]] = relationship(back_populates="url_source")
     alerts: Mapped[list["Alert"]] = relationship(back_populates="url_source")
@@ -121,6 +131,8 @@ class DocumentVersion(Base):
     file_path: Mapped[str] = mapped_column(Text, nullable=False)
     file_hash: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     file_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    file_object_id: Mapped[int | None] = mapped_column(ForeignKey("file_objects.id"), index=True)
+    original_file_name: Mapped[str | None] = mapped_column(String(500))
     downloaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     content_hash: Mapped[str | None] = mapped_column(String(128), index=True)
@@ -189,6 +201,11 @@ class Alert(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     handled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     handled_by: Mapped[str | None] = mapped_column(String(120))
+    dedupe_key: Mapped[str | None] = mapped_column(String(128), index=True)
+    repeat_count: Mapped[int] = mapped_column(Integer, default=1)
+    first_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    risk_level: Mapped[str | None] = mapped_column(String(20), index=True)
 
     document: Mapped["Document | None"] = relationship(back_populates="alerts")
     url_source: Mapped["UrlSource | None"] = relationship(back_populates="alerts")
@@ -247,6 +264,13 @@ class TrustedSource(TimestampMixin, Base):
     crawl_frequency: Mapped[str | None] = mapped_column(String(80), default="weekly")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     remark: Mapped[str | None] = mapped_column(Text)
+    source_role: Mapped[str | None] = mapped_column(String(40), index=True)
+    domain: Mapped[str | None] = mapped_column(String(255), index=True)
+    status_authority_weight: Mapped[int | None] = mapped_column(Integer)
+    fulltext_weight: Mapped[int | None] = mapped_column(Integer)
+    metadata_weight: Mapped[int | None] = mapped_column(Integer)
+    source_health_score: Mapped[int | None] = mapped_column(Integer, index=True)
+    governance_status: Mapped[str] = mapped_column(String(40), default="pending", index=True)
 
 
 class SourceCategory(Base):
@@ -304,6 +328,11 @@ class StandardResource(TimestampMixin, Base):
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     sync_status: Mapped[str | None] = mapped_column(String(80))
     matched_document_count: Mapped[int] = mapped_column(Integer, default=0)
+    auto_decision: Mapped[str | None] = mapped_column(String(40), index=True)
+    confidence_score: Mapped[int | None] = mapped_column(Integer, index=True)
+    decision_reason: Mapped[str | None] = mapped_column(Text)
+    risk_level: Mapped[str | None] = mapped_column(String(20), index=True)
+    last_governed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class StandardDetail(Base):
@@ -417,6 +446,129 @@ class WpsStandardQueryRecord(TimestampMixin, Base):
     wps_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     source_sheet: Mapped[str] = mapped_column(String(120), default="标准查询系统")
     governance_status: Mapped[str] = mapped_column(String(40), default="pending", index=True)
+
+
+class SourceGovernanceRun(TimestampMixin, Base):
+    __tablename__ = "source_governance_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    run_type: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(40), default="pending", index=True)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    processed: Mapped[int] = mapped_column(Integer, default=0)
+    success: Mapped[int] = mapped_column(Integer, default=0)
+    failed: Mapped[int] = mapped_column(Integer, default=0)
+    message: Mapped[str | None] = mapped_column(Text)
+    config_json: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class SourceRecordCandidate(TimestampMixin, Base):
+    __tablename__ = "source_record_candidates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("source_governance_runs.id"), nullable=False, index=True)
+    url_source_id: Mapped[int | None] = mapped_column(ForeignKey("url_sources.id"), index=True)
+    trusted_source_id: Mapped[int | None] = mapped_column(ForeignKey("trusted_sources.id"), index=True)
+    candidate_type: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    source_url: Mapped[str | None] = mapped_column(Text)
+    host: Mapped[str | None] = mapped_column(String(255), index=True)
+    url_type: Mapped[str | None] = mapped_column(String(40), index=True)
+    quality_score: Mapped[int | None] = mapped_column(Integer, index=True)
+    duplicate_group_key: Mapped[str | None] = mapped_column(String(64), index=True)
+    governance_status: Mapped[str] = mapped_column(String(40), default="pending", index=True)
+    evidence_json: Mapped[str | None] = mapped_column(Text)
+
+
+class GovernanceDecision(Base):
+    __tablename__ = "governance_decisions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    run_id: Mapped[int | None] = mapped_column(ForeignKey("source_governance_runs.id"), index=True)
+    target_type: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    target_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    decision: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    reason: Mapped[str | None] = mapped_column(Text)
+    confidence_score: Mapped[int | None] = mapped_column(Integer, index=True)
+    decision_reason: Mapped[str | None] = mapped_column(Text)
+    evidence_count: Mapped[int | None] = mapped_column(Integer)
+    highest_source_level: Mapped[str | None] = mapped_column(String(30))
+    highest_source_weight: Mapped[int | None] = mapped_column(Integer)
+    conflict_count: Mapped[int | None] = mapped_column(Integer)
+    risk_level: Mapped[str | None] = mapped_column(String(20), index=True)
+    decided_by: Mapped[str | None] = mapped_column(String(120))
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    metadata_json: Mapped[str | None] = mapped_column(Text)
+
+
+class FileObject(Base):
+    __tablename__ = "file_objects"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    file_hash: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    content_hash: Mapped[str | None] = mapped_column(String(128), index=True)
+    file_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    file_ext: Mapped[str | None] = mapped_column(String(20))
+    mime_type: Mapped[str | None] = mapped_column(String(120))
+    storage_backend: Mapped[str | None] = mapped_column(String(40))
+    storage_path: Mapped[str | None] = mapped_column(Text)
+    baidu_pan_uri: Mapped[str | None] = mapped_column(Text)
+    minio_object_key: Mapped[str | None] = mapped_column(Text)
+    local_path: Mapped[str | None] = mapped_column(Text)
+    pdf_valid: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    pdf_validation_status: Mapped[str | None] = mapped_column(String(40))
+    pdf_page_count: Mapped[int | None] = mapped_column(Integer)
+    pdf_title: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class OcrDownloadTask(TimestampMixin, Base):
+    __tablename__ = "ocr_download_tasks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    resource_id: Mapped[int | None] = mapped_column(ForeignKey("standard_resources.id"), index=True)
+    url_source_id: Mapped[int | None] = mapped_column(ForeignKey("url_sources.id"), index=True)
+    source_id: Mapped[int | None] = mapped_column(ForeignKey("trusted_sources.id"), index=True)
+    standard_no: Mapped[str | None] = mapped_column(String(120), index=True)
+    standard_name: Mapped[str | None] = mapped_column(String(500))
+    download_url: Mapped[str | None] = mapped_column(Text)
+    captcha_url: Mapped[str | None] = mapped_column(Text)
+    provider: Mapped[str | None] = mapped_column(String(40), index=True)
+    status: Mapped[str] = mapped_column(String(40), default="PENDING", index=True)
+    priority: Mapped[int] = mapped_column(Integer, default=50, index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    locked_by: Mapped[str | None] = mapped_column(String(120))
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decision_id: Mapped[int | None] = mapped_column(ForeignKey("governance_decisions.id"), index=True)
+    file_object_id: Mapped[int | None] = mapped_column(ForeignKey("file_objects.id"), index=True)
+    host: Mapped[str | None] = mapped_column(String(255), index=True)
+
+
+class ProcessAuditLog(Base):
+    __tablename__ = "process_audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    process_name: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    action: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    target_type: Mapped[str | None] = mapped_column(String(40), index=True)
+    target_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    status: Mapped[str] = mapped_column(String(40), default="ok", index=True)
+    message: Mapped[str | None] = mapped_column(Text)
+    detail_json: Mapped[str | None] = mapped_column(Text)
+    process_type: Mapped[str | None] = mapped_column(String(80), index=True)
+    step_name: Mapped[str | None] = mapped_column(String(80), index=True)
+    source_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    confidence_score: Mapped[int | None] = mapped_column(Integer)
+    input_summary: Mapped[str | None] = mapped_column(Text)
+    output_summary: Mapped[str | None] = mapped_column(Text)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
 class CollectionTask(TimestampMixin, Base):

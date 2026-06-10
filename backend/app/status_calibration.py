@@ -7,7 +7,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app import models
-from app.alerts import mark_alert_auto_handled
+from app.alerts import upsert_pending_alert
 from app.standard_number import normalize_standard_no
 
 
@@ -205,19 +205,17 @@ def calibrate_resource_status(db: Session, resource: models.StandardResource) ->
             )
 
         if is_conflict or suggested_status in {"来源确认废止", "疑似被替代"}:
-            db.add(
-                mark_alert_auto_handled(
-                    models.Alert(
-                        document_id=document.id,
-                        url_source_id=None,
-                        alert_type="可信源状态冲突" if is_conflict else "可信源废止提醒",
-                        alert_level=models.AlertLevel.high.value,
-                        message=(
-                            f"{document.title}：本地状态 {old_status}，可信源状态 {source_status}。"
-                            f"证据：{resource.detail_url or ''}"
-                        ),
-                    )
-                )
+            upsert_pending_alert(
+                db,
+                alert_type="可信源状态冲突" if is_conflict else "可信源废止提醒",
+                alert_level=models.AlertLevel.high.value,
+                risk_level="high",
+                message=(
+                    f"{document.title}：本地状态 {old_status}，可信源状态 {source_status}。"
+                    f"证据：{resource.detail_url or ''}"
+                ),
+                dedupe_key=f"status-calibration:{resource.id}:{document.id}:{source_status}",
+                document_id=document.id,
             )
             created_alerts += 1
         elif document.manual_status is None and document.review_status != models.ReviewStatus.confirmed.value:

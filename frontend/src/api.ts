@@ -25,6 +25,16 @@ export type UrlSource = {
   status: string
   check_frequency?: string
   last_checked_at?: string
+  host?: string
+  url_type?: string
+  file_ext?: string
+  is_official_domain?: boolean
+  is_cloud_drive?: boolean
+  is_probable_pdf?: boolean
+  is_probable_detail_page?: boolean
+  source_quality_score?: number
+  governance_status?: string
+  duplicate_group_key?: string
 }
 
 export type UrlCheckResult = {
@@ -164,6 +174,296 @@ export type TrustedSource = {
   crawl_frequency?: string
   enabled: boolean
   remark?: string
+  source_role?: string
+  domain?: string
+  status_authority_weight?: number
+  fulltext_weight?: number
+  metadata_weight?: number
+  source_health_score?: number
+  governance_status?: string
+}
+
+export type SourceGovernanceRun = {
+  id: number
+  run_type: string
+  status: string
+  total: number
+  processed: number
+  success: number
+  failed: number
+  message?: string
+  config_json?: string
+  started_at?: string
+  finished_at?: string
+  created_at: string
+  updated_at?: string
+}
+
+export type GovernanceSummary = {
+  total: number
+  profiled: number
+  unprofiled: number
+  official_count: number
+  pdf_count: number
+  cloud_drive_count: number
+  duplicate_count: number
+  invalid_count: number
+  need_ocr_count: number
+  high_priority_count: number
+  clue_only_count: number
+  blacklist_candidate_count: number
+  url_sources: Record<string, number>
+  trusted_sources: Record<string, number>
+  recent_runs: Array<{
+    id: number
+    run_type: string
+    status: string
+    total: number
+    success: number
+    failed: number
+    message?: string
+    started_at?: string
+    finished_at?: string
+  }>
+}
+
+export type ProfileUrlSourcesResult = {
+  run_id?: number | null
+  total: number
+  profiled: number
+  official_count: number
+  pdf_count: number
+  cloud_drive_count: number
+  duplicate_count: number
+  invalid_count: number
+  need_ocr_count: number
+  high_priority_count: number
+  clue_only_count: number
+  blacklist_candidate_count: number
+  dry_run: boolean
+}
+
+export type SampleRunResult = ProfileUrlSourcesResult & {
+  sample_type: string
+  scanned: number
+}
+
+export type RunDecisionsResult = {
+  processed: number
+  auto_confirmed: number
+  auto_merged: number
+  auto_downgraded: number
+  auto_rejected: number
+  need_review: number
+  high_risk_count: number
+  conflict_count: number
+  dry_run: boolean
+  run_id?: number | null
+}
+
+export type GovernanceExceptionItem = {
+  decision_id: number
+  resource_id: number
+  standard_no?: string | null
+  standard_name: string
+  exception_type: string
+  risk_level?: string | null
+  highest_source_level?: string | null
+  highest_source_weight?: number | null
+  conflict_sources?: string[]
+  system_suggestion?: string | null
+  handle_status: string
+  confidence_score?: number | null
+  conflict_count?: number
+  decided_at?: string | null
+}
+
+export type GovernanceExceptionPage = {
+  total: number
+  items: GovernanceExceptionItem[]
+  next_cursor?: number | null
+  has_more: boolean
+}
+
+export type GovernanceSupervisionSummary = {
+  pending_exceptions: number
+  high_risk_exceptions: number
+  auto_confirmed: number
+  auto_merged: number
+  auto_downgraded: number
+  pending_alerts: number
+  recent_runs: Array<{
+    id: number
+    run_type: string
+    status: string
+    total: number
+    success: number
+    failed: number
+    message?: string
+    finished_at?: string
+  }>
+}
+
+export type OcrTaskDashboard = {
+  pending: number
+  running: number
+  success_today: number
+  ocr_success_rate: number
+  pdf_pass_rate: number
+  failed: number
+  need_manual: number
+}
+
+export type OcrDownloadTask = {
+  id: number
+  resource_id?: number | null
+  standard_no?: string | null
+  standard_name?: string | null
+  provider?: string | null
+  status: string
+  priority: number
+  attempt_count: number
+  max_attempts: number
+  last_error?: string | null
+  next_retry_at?: string | null
+  finished_at?: string | null
+  created_at?: string | null
+}
+
+export type OcrDownloadTaskPage = {
+  total: number
+  items: OcrDownloadTask[]
+  next_cursor?: number | null
+  has_more: boolean
+}
+
+export type FileObjectItem = {
+  id: number
+  file_hash: string
+  file_size: number
+  pdf_valid: boolean
+  pdf_validation_status?: string | null
+  pdf_page_count?: number | null
+  storage_backend?: string | null
+  local_path?: string | null
+  linked_standard_count: number
+  linked_source_count: number
+  created_at?: string | null
+}
+
+export type FileObjectPage = {
+  total: number
+  items: FileObjectItem[]
+  next_cursor?: number | null
+  has_more: boolean
+}
+
+export type GovernanceDashboardSummary = {
+  url_total: number
+  profiled_url_count: number
+  ungoverned_url_count: number
+  official_source_count: number
+  low_trust_source_count: number
+  duplicate_url_count: number
+  invalid_url_count: number
+  need_ocr_count: number
+  auto_confirmed_count: number
+  need_manual_count: number
+  ocr_success_today: number
+  pdf_invalid_today: number
+  auto_merged_count?: number
+  auto_downgraded_count?: number
+  pending_alerts?: number
+  distributions: {
+    url_type?: Record<string, number>
+    source_quality?: Record<string, number>
+    governance_status?: Record<string, number>
+    risk?: Record<string, number>
+  }
+}
+
+export type SourceHealthItem = {
+  id: number
+  source_name: string
+  source_role?: string | null
+  trust_level: string
+  domain?: string | null
+  health_score: number
+  capture_success_rate: number
+  number_parse_rate: number
+  status_parse_rate: number
+  pdf_valid_rate: number
+  ocr_success_rate: number
+  duplicate_rate: number
+  conflict_rate: number
+  governance_status: string
+  enabled: boolean
+  url_count: number
+  resource_count: number
+  need_ocr_count: number
+  suggested_action: string
+}
+
+export type SourceHealthPage = {
+  total: number
+  items: SourceHealthItem[]
+  next_cursor?: number | null
+  has_more: boolean
+}
+
+export type OcrTasksSummary = {
+  pending_ocr: number
+  running: number
+  archived: number
+  ocr_failed: number
+  captcha_failed: number
+  download_failed: number
+  pdf_invalid: number
+  duplicate_file: number
+  skipped: number
+  need_manual: number
+  success_today: number
+  ocr_success_rate_today: number
+  pdf_pass_rate_today: number
+  pending?: number
+  failed?: number
+  ocr_success_rate?: number
+  pdf_pass_rate?: number
+}
+
+export type FileObjectsSummary = {
+  total: number
+  pdf_valid: number
+  pdf_invalid: number
+  duplicate_hint: number
+  large_files: number
+  unlinked: number
+}
+
+export type SupervisionSummaryEnhanced = GovernanceSupervisionSummary & {
+  auto_rejected: number
+  status_conflict_count: number
+  file_anomaly_count: number
+  ocr_anomaly_count: number
+  need_review_count: number
+}
+
+export type ProcessAuditLog = {
+  id: number
+  process_name: string
+  process_type?: string | null
+  step_name?: string | null
+  action: string
+  target_type?: string | null
+  target_id?: number | null
+  source_id?: number | null
+  status: string
+  message?: string | null
+  confidence_score?: number | null
+  input_summary?: string | null
+  output_summary?: string | null
+  error_message?: string | null
+  created_at?: string | null
 }
 
 export type SourceCategory = {
@@ -206,6 +506,12 @@ export type StandardResource = {
   pdf_trial_url?: string
   last_synced_at?: string
   matched_document_count?: number
+  auto_decision?: string | null
+  confidence_score?: number | null
+  decision_reason?: string | null
+  risk_level?: string | null
+  last_governed_at?: string | null
+  manual_status?: string | null
 }
 
 export type ResourceDownloadCaptchaChallenge = {
