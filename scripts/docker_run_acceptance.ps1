@@ -30,24 +30,8 @@ Require-Docker
 Write-Host "== docker compose build =="
 docker compose build
 
-Write-Host "== docker compose up postgres =="
-docker compose up -d postgres
-docker compose ps postgres
-
-Write-Host "== wait postgres healthy =="
-$deadline = (Get-Date).AddSeconds(120)
-while ((Get-Date) -lt $deadline) {
-    $health = docker inspect --format='{{.State.Health.Status}}' (docker compose ps -q postgres) 2>$null
-    if ($health -eq "healthy") { break }
-    Start-Sleep -Seconds 3
-}
-if ($health -ne "healthy") { Write-Error "postgres not healthy within timeout" }
-
-Write-Host "== docker compose up api frontend workers =="
-docker compose up -d api
-docker compose up -d frontend
-docker compose up -d collection-worker
-docker compose up -d ocr-worker
+Write-Host "== docker compose up (single DB: host PostgreSQL via host.docker.internal) =="
+docker compose up -d api frontend collection-worker ocr-worker
 docker compose ps
 
 Write-Host "== wait API /health =="

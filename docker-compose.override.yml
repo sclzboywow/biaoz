@@ -1,5 +1,0 @@
-# Local dev: avoid conflict with host PostgreSQL on 5432.
-services:
-  postgres:
-    ports:
-      - "5433:5432"

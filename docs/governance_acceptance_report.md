@@ -9,8 +9,7 @@
 | 验收时间 | 2026-06-10 |
 | API 地址 | `http://127.0.0.1:8000` |
 | 前端地址 | `http://127.0.0.1:5173` |
-| 数据库 | 宿主机 PostgreSQL（`localhost:5432/biaoz`，约 15.4 万 URL / 56.4 万标准资源） |
-| Docker 说明 | 容器 API 通过 `docker-compose.acceptance.yml` 连接 `host.docker.internal:5432` 进行业务数据验收；独立 Docker 卷内 PostgreSQL 为空库，仅用于容器/迁移结构验证 |
+| 数据库 | **唯一实例：宿主机 PostgreSQL `localhost:5432/biaoz`**（Docker 与本地 `.env` 共用，无 compose 内置空库） |
 
 ### Docker Compose 服务状态（验收时）
 
