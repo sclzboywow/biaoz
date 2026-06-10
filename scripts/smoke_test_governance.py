@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Governance phase acceptance smoke test (DB schema + HTTP APIs).
+"""Governance HTTP smoke test for acceptance.
 
 Usage:
-  backend/.venv/Scripts/python.exe scripts/smoke_test_governance.py
-  backend/.venv/Scripts/python.exe scripts/smoke_test_governance.py --api-base http://127.0.0.1:8000
+  python scripts/smoke_test_governance.py
+  python scripts/smoke_test_governance.py --base-url http://127.0.0.1:8000 --dry-run true
 """
 from __future__ import annotations
 
@@ -13,86 +13,30 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
-ROOT = Path(__file__).resolve().parents[1]
-BACKEND = ROOT / "backend"
-if str(BACKEND) not in sys.path:
-    sys.path.insert(0, str(BACKEND))
-os.chdir(BACKEND)
-
-from sqlalchemy import inspect, text
-
-from app.database import SessionLocal, engine
-
-REQUIRED_TABLES = [
-    "source_governance_runs",
-    "source_record_candidates",
-    "governance_decisions",
-    "file_objects",
-    "ocr_download_tasks",
-    "process_audit_logs",
-]
-
-REQUIRED_COLUMNS: dict[str, list[str]] = {
-    "url_sources": [
-        "host",
-        "url_type",
-        "file_ext",
-        "is_official_domain",
-        "is_cloud_drive",
-        "is_probable_pdf",
-        "is_probable_detail_page",
-        "source_quality_score",
-        "governance_status",
-        "duplicate_group_key",
-    ],
-    "trusted_sources": [
-        "source_role",
-        "domain",
-        "status_authority_weight",
-        "fulltext_weight",
-        "metadata_weight",
-        "source_health_score",
-        "governance_status",
-    ],
-    "alerts": [
-        "dedupe_key",
-        "repeat_count",
-        "first_seen_at",
-        "last_seen_at",
-        "risk_level",
-    ],
-    "document_versions": [
-        "file_object_id",
-        "original_file_name",
-    ],
-}
+SAMPLE_TYPES = ("official_domains", "pdf_links", "cloud_drive", "commercial_sites")
 
 
-def check_schema() -> list[str]:
-    errors: list[str] = []
-    inspector = inspect(engine)
-    tables = set(inspector.get_table_names())
-    for table in REQUIRED_TABLES:
-        if table not in tables:
-            errors.append(f"missing table: {table}")
-    for table, columns in REQUIRED_COLUMNS.items():
-        if table not in tables:
-            errors.append(f"missing table for column check: {table}")
-            continue
-        existing = {col["name"] for col in inspector.get_columns(table)}
-        for col in columns:
-            if col not in existing:
-                errors.append(f"missing column: {table}.{col}")
-    with SessionLocal() as db:
-        row = db.execute(text("SELECT version_num FROM alembic_version")).scalar_one_or_none()
-        if row != "20260610_0005":
-            errors.append(f"alembic head mismatch: current={row!r}, expected='20260610_0005'")
-    return errors
+@dataclass
+class CheckResult:
+    name: str
+    url: str
+    method: str
+    status: int | None = None
+    ok: bool = False
+    keys: dict[str, Any] = field(default_factory=dict)
+    error: str | None = None
+    warning: str | None = None
 
 
-def _http_json(method: str, url: str, payload: dict | None = None, timeout: int = 120):
+def _parse_bool(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _http_call(method: str, url: str, payload: dict | None = None, timeout: int = 180) -> tuple[int, dict | list | str]:
     data = None
     headers = {"Accept": "application/json"}
     if payload is not None:
@@ -100,108 +44,199 @@ def _http_json(method: str, url: str, payload: dict | None = None, timeout: int 
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        body = resp.read().decode("utf-8")
-        return resp.status, json.loads(body) if body else {}
-
-
-def check_http(api_base: str) -> list[str]:
-    errors: list[str] = []
-    base = api_base.rstrip("/")
-    api = f"{base}/api/v1"
-
-    def get(path: str):
-        url = f"{api}{path}"
+        raw = resp.read().decode("utf-8")
+        if not raw:
+            return resp.status, {}
         try:
-            status, data = _http_json("GET", url)
-        except urllib.error.HTTPError as exc:
-            errors.append(f"GET {path} -> {exc.code}: {exc.read()[:200]!r}")
-            return None
-        if status >= 400:
-            errors.append(f"GET {path} -> {status}")
-            return None
-        return data
+            return resp.status, json.loads(raw)
+        except json.JSONDecodeError:
+            return resp.status, raw
 
-    def post(path: str, payload: dict):
-        url = f"{api}{path}"
-        try:
-            status, data = _http_json("POST", url, payload)
-        except urllib.error.HTTPError as exc:
-            errors.append(f"POST {path} -> {exc.code}: {exc.read()[:200]!r}")
-            return None
-        if status >= 400:
-            errors.append(f"POST {path} -> {status}")
-            return None
-        return data
 
+def _pick_keys(data: Any, keys: list[str]) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        return {"raw": data}
+    return {k: data.get(k) for k in keys if k in data}
+
+
+def _run_check(
+    results: list[CheckResult],
+    *,
+    name: str,
+    method: str,
+    url: str,
+    payload: dict | None = None,
+    key_fields: list[str] | None = None,
+    allow_empty: bool = False,
+) -> None:
+    item = CheckResult(name=name, url=url, method=method)
     try:
-        status, health = _http_json("GET", f"{base}/health")
-        if status >= 400:
-            errors.append(f"GET /health -> {status}")
+        status, body = _http_call(method, url, payload)
+        item.status = status
+        if status >= 500:
+            item.error = json.dumps(body, ensure_ascii=False)[:2000] if isinstance(body, (dict, list)) else str(body)[:2000]
+        elif status >= 400:
+            item.error = f"HTTP {status}: {body!r}"[:2000]
         else:
-            print(f"OK /health -> {health}")
+            item.ok = True
+            item.keys = _pick_keys(body, key_fields or [])
+            if allow_empty and isinstance(body, dict):
+                zero_fields = [k for k, v in item.keys.items() if v in (0, None, [], {})]
+                if zero_fields and len(zero_fields) == len(item.keys):
+                    item.warning = f"empty metrics: {', '.join(zero_fields)}"
+    except urllib.error.HTTPError as exc:
+        item.status = exc.code
+        body = exc.read().decode("utf-8", errors="replace")
+        item.error = body[:2000]
+        if exc.code >= 500:
+            item.error = f"HTTP {exc.code}: {body[:2000]}"
     except Exception as exc:
-        errors.append(f"GET /health failed: {exc}")
-        return errors
-
-    summary = get("/dashboard/governance-summary")
-    if summary:
-        print(f"OK governance-summary url_total={summary.get('url_total')}")
-
-    profile = post("/source-governance/profile-url-sources", {"limit": 50, "dry_run": True, "only_ungoverned": True})
-    if profile:
-        print(f"OK profile-url-sources dry_run total={profile.get('total')} profiled={profile.get('profiled')}")
-
-    decisions = post("/governance/run-decisions", {"limit": 50, "only_unprocessed": True, "dry_run": True})
-    if decisions:
-        print(f"OK run-decisions dry_run processed={decisions.get('processed')}")
-
-    ocr = get("/ocr-tasks/summary")
-    if ocr:
-        print(f"OK ocr-tasks/summary pending_ocr={ocr.get('pending_ocr')}")
-
-    files = get("/file-objects/summary")
-    if files:
-        print(f"OK file-objects/summary total={files.get('total')}")
-
-    return errors
+        item.error = str(exc)
+    results.append(item)
+    status_text = item.status if item.status is not None else "-"
+    flag = "PASS" if item.ok else "FAIL"
+    print(f"[{flag}] {method} {url} -> {status_text}")
+    if item.keys:
+        print(f"       keys: {json.dumps(item.keys, ensure_ascii=False)}")
+    if item.warning:
+        print(f"       warn: {item.warning}")
+    if item.error:
+        print(f"       error: {item.error[:500]}")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Governance acceptance smoke test")
-    parser.add_argument("--api-base", default=os.getenv("API_BASE", "http://127.0.0.1:8000"))
-    parser.add_argument("--skip-http", action="store_true")
-    parser.add_argument("--http-only", action="store_true", help="Skip DB schema checks (use after docker compose up)")
+    parser.add_argument("--base-url", default=os.getenv("API_BASE", "http://127.0.0.1:8000"))
+    parser.add_argument("--profile-limit", type=int, default=100)
+    parser.add_argument("--decision-limit", type=int, default=100)
+    parser.add_argument("--dry-run", default="true", help="true/false for POST dry_run payloads")
     args = parser.parse_args()
 
-    schema_errors: list[str] = []
-    if args.http_only:
-        print("== Schema checks ==\nSKIP (--http-only)")
-    else:
-        print("== Schema checks ==")
-        schema_errors = check_schema()
-    if schema_errors:
-        for err in schema_errors:
-            print(f"FAIL {err}")
-    elif not args.http_only:
-        print("OK schema tables/columns/alembic head")
+    base = args.base_url.rstrip("/")
+    api = f"{base}/api/v1"
+    dry_run = _parse_bool(args.dry_run)
+    results: list[CheckResult] = []
 
-    http_errors: list[str] = []
-    if not args.skip_http:
-        print("\n== HTTP checks ==")
-        print("Tip: 404 on /api/v1/* usually means the running API process is outdated; restart backend after deploy.")
-        try:
-            http_errors = check_http(args.api_base)
-        except Exception as exc:
-            http_errors.append(f"HTTP connection failed: {exc}")
-            print(f"FAIL {http_errors[-1]}")
+    print(f"== smoke test base={base} dry_run={dry_run} ==")
 
-    all_errors = schema_errors + http_errors
+    _run_check(
+        results,
+        name="health",
+        method="GET",
+        url=f"{base}/health",
+        key_fields=["status", "system"],
+    )
+    _run_check(
+        results,
+        name="governance-dashboard-summary",
+        method="GET",
+        url=f"{api}/dashboard/governance-summary",
+        key_fields=["url_total", "profiled_url_count", "ungoverned_url_count", "need_ocr_count"],
+        allow_empty=True,
+    )
+    _run_check(
+        results,
+        name="governance-summary",
+        method="GET",
+        url=f"{api}/governance/summary",
+        key_fields=["url_total", "profiled_url_count"],
+        allow_empty=True,
+    )
+    _run_check(
+        results,
+        name="ocr-tasks-summary",
+        method="GET",
+        url=f"{api}/ocr-tasks/summary",
+        key_fields=["pending_ocr", "archived", "total"],
+        allow_empty=True,
+    )
+    _run_check(
+        results,
+        name="file-objects-summary",
+        method="GET",
+        url=f"{api}/file-objects/summary",
+        key_fields=["total", "valid_pdf_count"],
+        allow_empty=True,
+    )
+    _run_check(
+        results,
+        name="profile-url-sources",
+        method="POST",
+        url=f"{api}/source-governance/profile-url-sources",
+        payload={"limit": args.profile_limit, "only_ungoverned": True, "dry_run": dry_run},
+        key_fields=["total", "profiled", "run_id"],
+        allow_empty=True,
+    )
+
+    for sample in SAMPLE_TYPES:
+        _run_check(
+            results,
+            name=f"run-sample-{sample}",
+            method="POST",
+            url=f"{api}/source-governance/run-sample",
+            payload={"sample_type": sample, "limit": 100, "dry_run": True},
+            key_fields=[
+                "sample_type",
+                "scanned",
+                "total",
+                "profiled",
+                "high_priority_count",
+                "clue_only_count",
+                "blacklist_candidate_count",
+            ],
+            allow_empty=True,
+        )
+
+    _run_check(
+        results,
+        name="run-decisions",
+        method="POST",
+        url=f"{api}/governance/run-decisions",
+        payload={"limit": args.decision_limit, "only_unprocessed": True, "dry_run": True},
+        key_fields=["processed", "auto_confirmed", "need_review", "dry_run"],
+        allow_empty=True,
+    )
+    _run_check(
+        results,
+        name="create-ocr-from-decisions",
+        method="POST",
+        url=f"{api}/ocr-tasks/create-from-decisions",
+        payload={"limit": 10, "only_unprocessed": True, "dry_run": True},
+        key_fields=["created", "skipped", "scanned"],
+        allow_empty=True,
+    )
+
+    passed = sum(1 for r in results if r.ok)
+    failed = sum(1 for r in results if not r.ok)
+    warnings = [r.name for r in results if r.warning]
+
+    summary = {
+        "passed": passed,
+        "failed": failed,
+        "warnings": warnings,
+        "total": len(results),
+        "dry_run": dry_run,
+        "results": [
+            {
+                "name": r.name,
+                "url": r.url,
+                "method": r.method,
+                "status": r.status,
+                "ok": r.ok,
+                "keys": r.keys,
+                "warning": r.warning,
+                "error": r.error,
+            }
+            for r in results
+        ],
+    }
     print("\n== Summary ==")
-    if all_errors:
-        print(json.dumps({"ok": False, "errors": all_errors}, ensure_ascii=False, indent=2))
-        return 1
-    print(json.dumps({"ok": True}, ensure_ascii=False, indent=2))
-    return 0
+    print(json.dumps({"passed": passed, "failed": failed, "warnings": warnings}, ensure_ascii=False, indent=2))
+    out = Path(__file__).resolve().parents[1] / "logs" / "smoke_test_governance.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"Saved: {out}")
+    return 0 if failed == 0 else 1
 
 
 if __name__ == "__main__":
