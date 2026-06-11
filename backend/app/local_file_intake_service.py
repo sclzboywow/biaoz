@@ -17,19 +17,21 @@ from app import models
 from app.config import get_settings
 from app.download_service import doc_type
 from app.settings_store import get_bool_setting
-from app.standard_number import normalize_standard_no
+from app.standard_number import canonicalize_standard_no_text, extract_standard_no_from_text, normalize_standard_no
 from app.status_calibration import calibrate_resource_status, link_archived_document_to_resources
-from app.storage import check_storage_root, relative_storage_path, sha256_file
+from app.storage import (
+    check_storage_root,
+    filesystem_safe_filename,
+    relative_storage_path,
+    safe_stem,
+    safe_suffix,
+    safe_upload_filename,
+    sha256_file,
+)
 from app.trusted_source_adapters import TrustedSourceSearchQuery
 from app.trusted_source_search_service import search_trusted_sources
 
 settings = get_settings()
-
-STANDARD_NO_PATTERN = re.compile(
-    r"(GB/T|GB/Z|GB|JGJ/T|JGJ|CJJ/T|CJJ|CECS|DB\d{0,2}/T|DB\d{0,2}|T/[A-Z0-9]+|[A-Z]{2,8}/T|[A-Z]{2,8})"
-    r"[\s\-_]*\d[\d\.\-]*[\s\-_]*\d{4}[A-Za-z]*",
-    re.I,
-)
 
 DECISION_LABELS = {
     "duplicate_ignore": "重复忽略",
@@ -81,22 +83,48 @@ def _intake_temp_dir(storage_root: Path, task_id: int) -> Path:
 
 
 def _extract_standard_no_from_text(text: str) -> str | None:
-    match = STANDARD_NO_PATTERN.search(text or "")
-    if not match:
-        return None
-    return match.group(0).strip()
+    return extract_standard_no_from_text(text)
+
+
+def _strip_standard_no_from_title(stem: str, standard_no: str | None) -> str:
+    if not standard_no:
+        return stem
+    title = stem
+    fragments = {
+        standard_no,
+        standard_no.replace("/", "-"),
+        standard_no.replace("/", ""),
+        standard_no.replace(" ", ""),
+    }
+    parts = normalize_standard_no(standard_no)
+    if parts.normalized:
+        fragments.add(parts.normalized)
+        fragments.add(parts.normalized.replace("/", "-"))
+        fragments.add(parts.normalized.replace(" ", ""))
+        if "/" in parts.normalized:
+            fragments.add(parts.normalized.replace("/", " "))
+            head, _, tail = parts.normalized.partition("/")
+            if tail:
+                fragments.add(f"{head}-{tail}")
+                fragments.add(f"{head} {tail}")
+    recanon = extract_standard_no_from_text(canonicalize_standard_no_text(stem))
+    if recanon:
+        fragments.add(recanon)
+    for fragment in sorted(fragments, key=len, reverse=True):
+        if fragment:
+            title = re.sub(re.escape(fragment), "", title, count=1, flags=re.I)
+    title = re.sub(r"^[\s\-_]+|[\s\-_]+$", "", title)
+    title = re.sub(r"[\s\-_]{2,}", " ", title).strip()
+    return title or stem
 
 
 def extract_local_file_metadata(file_path: Path, *, original_name: str | None = None, mime_type: str | None = None) -> ExtractedMetadata:
-    name = original_name or file_path.name
-    stem = Path(name).stem
-    suffix = Path(name).suffix.lower().lstrip(".")
+    name = original_name or safe_upload_filename(file_path.name)
+    stem = safe_stem(name)
+    suffix = safe_suffix(name)
     standard_no = _extract_standard_no_from_text(stem) or _extract_standard_no_from_text(name)
     number_parts = normalize_standard_no(standard_no)
-    title = stem
-    if standard_no:
-        title = re.sub(re.escape(standard_no), "", stem, count=1, flags=re.I)
-        title = re.sub(r"^[\s\-_]+|[\s\-_]+$", "", title).strip() or stem
+    title = _strip_standard_no_from_title(stem, standard_no)
     return ExtractedMetadata(
         standard_no=number_parts.raw or standard_no,
         normalized_standard_no=number_parts.normalized,
@@ -123,10 +151,11 @@ async def create_intake_task(db: Session, upload_file: UploadFile) -> models.Loc
     if not storage_status.available:
         raise ValueError(f"存储目录不可用：{storage_status.message}")
 
-    safe_name = Path(upload_file.filename or "upload.bin").name
+    safe_name = safe_upload_filename(upload_file.filename)
+    disk_name = filesystem_safe_filename(upload_file.filename)
     staging_dir = storage_status.root / "local-intake" / "pending" / uuid4().hex
     staging_dir.mkdir(parents=True, exist_ok=True)
-    target_path = staging_dir / safe_name
+    target_path = staging_dir / disk_name
 
     size = 0
     with target_path.open("wb") as file_obj:
@@ -155,7 +184,7 @@ async def create_intake_task(db: Session, upload_file: UploadFile) -> models.Loc
     db.flush()
 
     final_dir = _intake_temp_dir(storage_status.root, task.id)
-    final_path = final_dir / safe_name
+    final_path = final_dir / disk_name
     target_path.replace(final_path)
     task.temp_file_path = relative_storage_path(storage_status.root, final_path)
     staging_dir.rmdir() if staging_dir.exists() and not any(staging_dir.iterdir()) else None
@@ -243,34 +272,99 @@ def match_standard_resources(db: Session, task: models.LocalFileIntakeTask) -> l
         return []
 
     results = search_trusted_sources(db, query, include_external=False, limit=20)
-    candidates: list[models.LocalFileRecognitionCandidate] = []
-    for item in results:
-        resource_id = item.raw.get("standard_resource_id")
-        title_score = item.raw.get("title_similarity") or _similarity(task.extracted_title, item.standard_name)
-        score = item.confidence_score
-        advice = "create_document" if score >= 85 else "manual_review" if score >= 70 else "need_review"
-        candidates.append(
-            models.LocalFileRecognitionCandidate(
-                task_id=task.id,
-                candidate_type="standard_resource",
-                candidate_id=int(resource_id) if resource_id is not None else None,
-                source_id=item.source_id,
-                source_name=item.source_name,
-                standard_no=item.standard_no,
-                normalized_standard_no=item.normalized_standard_no,
-                standard_name=item.standard_name,
-                source_status=item.source_status,
-                publish_date=item.publish_date,
-                effective_date=item.effective_date,
-                abolish_date=item.abolish_date,
-                detail_url=item.detail_url,
-                pdf_trial_url=item.pdf_trial_url,
-                match_score=score,
-                match_reason=item.match_reason or f"可信源索引命中，标题相似度 {title_score}%",
-                decision_advice=advice,
-            )
-        )
-    return candidates
+    return [_candidate_from_search_result(task, item, search_backend="local_index") for item in results]
+
+
+def _candidate_from_search_result(
+    task: models.LocalFileIntakeTask,
+    item,
+    *,
+    search_backend: str,
+) -> models.LocalFileRecognitionCandidate:
+    resource_id = item.raw.get("standard_resource_id")
+    title_score = item.raw.get("title_similarity") or _similarity(task.extracted_title, item.standard_name)
+    score = item.confidence_score
+    advice = "create_document" if score >= 85 else "manual_review" if score >= 70 else "need_review"
+    return models.LocalFileRecognitionCandidate(
+        task_id=task.id,
+        candidate_type="standard_resource",
+        candidate_id=int(resource_id) if resource_id is not None else None,
+        source_id=item.source_id,
+        source_name=item.source_name,
+        standard_no=item.standard_no,
+        normalized_standard_no=item.normalized_standard_no,
+        standard_name=item.standard_name,
+        source_status=item.source_status,
+        publish_date=item.publish_date,
+        effective_date=item.effective_date,
+        abolish_date=item.abolish_date,
+        detail_url=item.detail_url,
+        pdf_trial_url=item.pdf_trial_url,
+        match_score=score,
+        match_reason=item.match_reason or f"可信源索引命中，标题相似度 {title_score}%",
+        decision_advice=advice,
+        search_backend=search_backend,
+    )
+
+
+def _candidate_dedupe_key(candidate: models.LocalFileRecognitionCandidate) -> str | None:
+    if candidate.detail_url:
+        return candidate.detail_url
+    if candidate.candidate_id and candidate.candidate_type == "standard_resource":
+        return f"local:{candidate.candidate_id}"
+    if candidate.normalized_standard_no:
+        return f"{candidate.source_id}:{candidate.normalized_standard_no}:{candidate.standard_name}"
+    return None
+
+
+def run_external_search_for_task(db: Session, task_id: int) -> tuple[models.LocalFileIntakeTask, int, list[dict[str, str | int]]]:
+    task = db.get(models.LocalFileIntakeTask, task_id)
+    if task is None:
+        raise ValueError("识别任务不存在")
+    if task.final_action:
+        raise ValueError("任务已处理，无法联网复核")
+
+    query = TrustedSourceSearchQuery(
+        standard_no=task.extracted_standard_no,
+        normalized_standard_no=task.normalized_standard_no,
+        standard_name=task.extracted_title,
+    )
+    if not (query.standard_no or query.normalized_standard_no or query.standard_name):
+        raise ValueError("缺少标准编号或标题，无法发起外网搜索")
+
+    errors: list[dict[str, str | int]] = []
+    results = search_trusted_sources(db, query, include_external=True, limit=20, errors=errors)
+    external_results = [item for item in results if item.raw.get("search_backend") == "external"]
+
+    existing_keys = {
+        key
+        for candidate in task.candidates
+        if (key := _candidate_dedupe_key(candidate)) is not None
+    }
+    added = 0
+    for item in external_results:
+        candidate = _candidate_from_search_result(task, item, search_backend="external")
+        key = _candidate_dedupe_key(candidate)
+        if key is not None and key in existing_keys:
+            continue
+        db.add(candidate)
+        if key is not None:
+            existing_keys.add(key)
+        added += 1
+
+    _append_log(
+        db,
+        task.id,
+        "external_search",
+        "ok" if not errors else "partial",
+        f"外网复核追加 {added} 条候选",
+        {"added": added, "errors": errors},
+    )
+    db.commit()
+    refreshed = get_intake_task_detail(db, task_id)
+    if refreshed is None:
+        raise ValueError("识别任务不存在")
+    return refreshed, added, errors
 
 
 def calculate_decision(candidates: list[models.LocalFileRecognitionCandidate], task: models.LocalFileIntakeTask) -> tuple[str, int, str, str]:

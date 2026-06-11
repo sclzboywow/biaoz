@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.settings_store import get_bool_setting, get_setting
 
 _WINDOWS_DRIVE_PATH_RE = re.compile(r"^[A-Za-z]:[/\\]")
+_STANDARD_PREFIX_SLASH_HEAD = re.compile(r"(?i)^(GB|JGJ|CJJ|DB\d{0,2}|T|[A-Z]{2,8})$")
 
 
 @dataclass
@@ -112,11 +113,64 @@ def relative_storage_path(storage_root: Path, file_path: Path) -> str:
         return str(file_path)
 
 
+def _is_standard_number_slash(head: str, tail: str) -> bool:
+    if not _STANDARD_PREFIX_SLASH_HEAD.fullmatch(head):
+        return False
+    if not tail:
+        return False
+    if tail[0].upper() == "T":
+        return True
+    return bool(re.match(r"[\s\-_.]*\d", tail))
+
+
+def safe_upload_filename(filename: str | None, *, default: str = "upload.bin") -> str:
+    raw = (filename or default).strip()
+    if not raw:
+        raw = default
+    normalized = raw.replace("\\", "/")
+    if _WINDOWS_DRIVE_PATH_RE.match(normalized) or normalized.count("/") > 1:
+        name = normalized.rsplit("/", 1)[-1].strip()
+        return name or default
+    if normalized.count("/") == 1:
+        head, tail = normalized.split("/", 1)
+        if _is_standard_number_slash(head, tail):
+            return normalized.strip() or default
+        name = tail.strip()
+        return name or default
+    return normalized.strip() or default
+
+
+def filesystem_safe_filename(filename: str | None, *, default: str = "upload.bin") -> str:
+    """Return a single path segment safe for OS storage."""
+    logical = safe_upload_filename(filename, default=default)
+    normalized = logical.replace("\\", "/")
+    if normalized.count("/") == 1:
+        head, tail = normalized.split("/", 1)
+        if _is_standard_number_slash(head, tail):
+            return f"{head}-{tail}"
+    return normalized.replace("/", "-") or default
+
+
+def safe_suffix(filename: str | None, *, default: str = "upload.bin") -> str:
+    base = safe_upload_filename(filename, default=default)
+    if "." in base:
+        return base.rsplit(".", 1)[-1].lower()
+    return ""
+
+
+def safe_stem(filename: str | None, *, default: str = "upload") -> str:
+    base = safe_upload_filename(filename, default=default)
+    if "." in base:
+        return base.rsplit(".", 1)[0]
+    return base
+
+
 async def save_upload(upload: UploadFile, storage_root: Path, document_id: int) -> tuple[Path, int, str]:
-    safe_name = Path(upload.filename or "upload.bin").name
+    safe_name = safe_upload_filename(upload.filename)
+    disk_name = filesystem_safe_filename(upload.filename)
     target_dir = storage_root / str(document_id)
     target_dir.mkdir(parents=True, exist_ok=True)
-    target_path = target_dir / f"{uuid4().hex}_{safe_name}"
+    target_path = target_dir / f"{uuid4().hex}_{disk_name}"
 
     size = 0
     with target_path.open("wb") as file_obj:

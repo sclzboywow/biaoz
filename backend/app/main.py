@@ -51,6 +51,7 @@ from app.local_file_intake_service import (
     delete_intake_task,
     get_intake_task_detail,
     list_intake_tasks_page,
+    run_external_search_for_task,
 )
 from app.url_governance_actions import apply_url_governance_action, batch_url_governance_actions, batch_profile_url_sources
 from app.governance_decision_service import (
@@ -493,6 +494,21 @@ def get_local_file_intake(task_id: int, db: Session = Depends(get_db)):
         task=schemas.LocalFileIntakeTaskOut.model_validate(task),
         candidates=[schemas.LocalFileRecognitionCandidateOut.model_validate(item) for item in task.candidates],
         logs=[schemas.LocalFileIntakeLogOut.model_validate(item) for item in task.logs],
+    )
+
+
+@api.post("/local-file-intake/{task_id}/external-search", response_model=schemas.LocalFileIntakeExternalSearchResponse)
+def external_search_local_file_intake(task_id: int, db: Session = Depends(get_db)):
+    try:
+        task, added, errors = run_external_search_for_task(db, task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return schemas.LocalFileIntakeExternalSearchResponse(
+        task=schemas.LocalFileIntakeTaskOut.model_validate(task),
+        candidates=[schemas.LocalFileRecognitionCandidateOut.model_validate(item) for item in task.candidates],
+        logs=[schemas.LocalFileIntakeLogOut.model_validate(item) for item in task.logs],
+        added=added,
+        errors=[schemas.TrustedSourceSearchErrorOut.model_validate(item) for item in errors],
     )
 
 
@@ -1011,16 +1027,19 @@ def search_trusted_sources_api(payload: schemas.TrustedSourceSearchRequest, db: 
         publish_date=payload.publish_date,
         effective_date=payload.effective_date,
     )
+    errors: list[dict[str, str | int]] = []
     items = search_trusted_sources(
         db,
         query,
         source_id=payload.source_id,
         include_external=payload.include_external,
         limit=payload.limit,
+        errors=errors,
     )
     return schemas.TrustedSourceSearchResponse(
         total=len(items),
         items=[_trusted_source_search_result_out(item) for item in items],
+        errors=[schemas.TrustedSourceSearchErrorOut.model_validate(item) for item in errors],
     )
 
 

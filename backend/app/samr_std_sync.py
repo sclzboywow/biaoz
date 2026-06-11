@@ -5,6 +5,7 @@ import json
 import os
 import time
 from datetime import UTC, date, datetime, timedelta
+from difflib import SequenceMatcher
 from typing import Any
 
 import httpx
@@ -13,7 +14,14 @@ from sqlalchemy.orm import Session
 from app import models
 from app.standard_number import normalize_standard_no
 from app.status_calibration import CHANGE_FIELD_LABELS, attach_change_logs_to_documents, calibrate_resource_status
-from app.trusted_source_adapters import TrustedSourceAdapter, TrustedSourceSyncOptions, TrustedSourceSyncStats, registry
+from app.trusted_source_adapters import (
+    TrustedSourceAdapter,
+    TrustedSourceSearchQuery,
+    TrustedSourceSearchResult,
+    TrustedSourceSyncOptions,
+    TrustedSourceSyncStats,
+    registry,
+)
 from app.trusted_source_search_service import LocalIndexSearchAdapterMixin
 
 
@@ -359,6 +367,155 @@ def fetch_list_page(client: httpx.Client, page_number: int) -> dict[str, Any]:
     return response.json()
 
 
+def _search_number_token(query: TrustedSourceSearchQuery) -> str | None:
+    parts = normalize_standard_no(query.normalized_standard_no or query.standard_no)
+    if parts.main_no and parts.year:
+        return f"{parts.main_no}-{parts.year}"
+    if parts.main_no:
+        return parts.main_no
+    raw = _text(query.standard_no or query.normalized_standard_no)
+    return raw
+
+
+def _search_name_token(query: TrustedSourceSearchQuery) -> str | None:
+    if query.standard_name:
+        return query.standard_name.strip()[:80] or None
+    for keyword in query.keywords:
+        keyword = keyword.strip()
+        if keyword:
+            return keyword[:80]
+    return None
+
+
+def fetch_search_page(client: httpx.Client, query: TrustedSourceSearchQuery, *, page_size: int = 20) -> dict[str, Any]:
+    params: dict[str, Any] = {
+        "tid": "2",
+        "pageNumber": 1,
+        "pageSize": max(1, min(page_size, 50)),
+    }
+    number_token = _search_number_token(query)
+    name_token = _search_name_token(query)
+    if number_token:
+        params["std_p4"] = number_token
+    elif name_token:
+        params["std_p8"] = name_token
+    else:
+        return {"total": 0, "rows": []}
+
+    response = client.get(
+        f"{BASE_URL}/gb/search/gbAdvancedSearchPage",
+        params=params,
+        headers={"Referer": f"{BASE_URL}/gb/search/gbAdvancedSearch"},
+    )
+    response.raise_for_status()
+    payload = response.json()
+    rows = payload.get("rows") if isinstance(payload, dict) else []
+    if number_token and name_token and isinstance(rows, list) and not rows:
+        response = client.get(
+            f"{BASE_URL}/gb/search/gbAdvancedSearchPage",
+            params={"tid": "2", "pageNumber": 1, "pageSize": params["pageSize"], "std_p8": name_token},
+            headers={"Referer": f"{BASE_URL}/gb/search/gbAdvancedSearch"},
+        )
+        response.raise_for_status()
+        payload = response.json()
+    return payload if isinstance(payload, dict) else {"total": 0, "rows": []}
+
+
+def _score_external_row(row: dict[str, Any], *, query: TrustedSourceSearchQuery) -> tuple[int, str]:
+    standard_no = _text(row.get("C_STD_CODE"))
+    standard_name = _text(row.get("C_C_NAME")) or _text(row.get("C_NAME")) or ""
+    number_parts = normalize_standard_no(standard_no)
+    title_score = int(SequenceMatcher(None, query.standard_name or "", standard_name).ratio() * 100)
+    number_match = bool(
+        query.normalized_standard_no
+        and number_parts.normalized
+        and query.normalized_standard_no == number_parts.normalized
+    ) or bool(query.standard_no and standard_no and query.standard_no == standard_no)
+    if number_match and title_score >= 80:
+        return 95, "外网实时命中：编号与标题高度一致"
+    if number_match:
+        return 90, "外网实时命中：标准编号一致"
+    if title_score >= 80:
+        return 80, f"外网实时命中：标题相似度 {title_score}%"
+    return max(55, title_score), f"外网实时命中：标题相似度 {title_score}%"
+
+
+def _row_to_external_search_result(
+    source: models.TrustedSource,
+    row: dict[str, Any],
+    *,
+    query: TrustedSourceSearchQuery,
+) -> TrustedSourceSearchResult | None:
+    item_id = _text(row.get("id"))
+    if not item_id:
+        return None
+    standard_no = _text(row.get("C_STD_CODE"))
+    standard_name = _text(row.get("C_C_NAME")) or _text(row.get("C_NAME")) or item_id
+    number_parts = normalize_standard_no(standard_no)
+    hcno = _text(row.get("OPEN_HASH_CODE"))
+    score, reason = _score_external_row(row, query=query)
+    return TrustedSourceSearchResult(
+        source_id=source.id,
+        source_name=source.source_name or SOURCE_NAME,
+        standard_no=standard_no,
+        normalized_standard_no=number_parts.normalized,
+        standard_name=standard_name,
+        source_status=_text(row.get("STATE2")),
+        publish_date=_parse_date(row.get("ISSUE_DATE")),
+        effective_date=_parse_date(row.get("ACT_DATE")),
+        abolish_date=_parse_date(row.get("D_DATE")),
+        detail_url=_detail_url(item_id),
+        pdf_trial_url=_online_url(hcno) if hcno and _flag_enabled(row.get("OPEN_ONLINE_STATUS")) else None,
+        confidence_score=score,
+        match_reason=reason,
+        raw={
+            "search_backend": "external",
+            "adapter_key": "samr_std_public",
+            "external_item_id": item_id,
+            "source_category_path": _source_category_path(row),
+        },
+    )
+
+
+def search_samr_std_external(
+    db: Session,
+    source_id: int,
+    query: TrustedSourceSearchQuery,
+    *,
+    limit: int = 20,
+) -> list[TrustedSourceSearchResult]:
+    source = db.get(models.TrustedSource, source_id)
+    if source is None:
+        return []
+    if not (_search_number_token(query) or _search_name_token(query)):
+        return []
+
+    with _client(timeout_seconds=30) as client:
+        try:
+            page = fetch_search_page(client, query, page_size=limit)
+        except httpx.HTTPStatusError as exc:
+            if _is_access_limited(exc):
+                raise RuntimeError(f"全国标准信息公共服务平台访问受限：{_http_error_message(exc)}") from exc
+            raise RuntimeError(f"全国标准信息公共服务平台搜索失败：{_http_error_message(exc)}") from exc
+        except httpx.RequestError as exc:
+            raise RuntimeError(f"全国标准信息公共服务平台网络异常：{exc}") from exc
+        rows = page.get("rows") if isinstance(page, dict) else []
+        if not isinstance(rows, list):
+            return []
+
+    results: list[TrustedSourceSearchResult] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        item = _row_to_external_search_result(source, row, query=query)
+        if item is not None:
+            results.append(item)
+        if len(results) >= limit:
+            break
+    results.sort(key=lambda item: item.confidence_score, reverse=True)
+    return results[:limit]
+
+
 def fetch_detail(client: httpx.Client, item_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
     response = client.get(
         f"{BASE_URL}/gb/search/gbDetailInfo",
@@ -657,6 +814,14 @@ class SamrStdPublicAdapter(LocalIndexSearchAdapterMixin):
             only_pending_categories=options.only_pending_categories,
         )
         return TrustedSourceSyncStats(**stats)
+
+    def search_external(self, db: Session, source_id: int, query: TrustedSourceSearchQuery) -> list[TrustedSourceSearchResult]:
+        source = db.get(models.TrustedSource, source_id)
+        if source is None:
+            raise ValueError("可信源不存在")
+        if source.adapter_key != self.adapter_key:
+            raise ValueError("samr_std_public 适配器只能处理全国标准信息公共服务平台")
+        return search_samr_std_external(db, source_id, query, limit=20)
 
 
 registry.register(SamrStdPublicAdapter())
