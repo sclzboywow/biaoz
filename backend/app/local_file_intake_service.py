@@ -307,6 +307,119 @@ def _candidate_from_search_result(
     )
 
 
+def _parse_source_book_id_from_detail_url(detail_url: str | None) -> str | None:
+    if not detail_url:
+        return None
+    match = re.search(r"[?&]id=([^&]+)", detail_url, flags=re.I)
+    return match.group(1) if match else None
+
+
+def _system_status_from_source(source_status: str | None) -> str:
+    if source_status == "废止":
+        return "来源确认废止"
+    if source_status == "现行":
+        return "来源确认现行"
+    return "待复核"
+
+
+def upsert_standard_resource_from_candidate(
+    db: Session,
+    candidate: models.LocalFileRecognitionCandidate,
+) -> int | None:
+    """Persist an external/live trusted-source hit into standard_resources for evidence linking."""
+    if candidate.candidate_type != "standard_resource" or not candidate.source_id:
+        return None
+    if candidate.candidate_id:
+        return candidate.candidate_id
+
+    source = db.get(models.TrustedSource, candidate.source_id)
+    if source is None:
+        return None
+
+    source_book_id = _parse_source_book_id_from_detail_url(candidate.detail_url)
+    resource = None
+    if source_book_id:
+        resource = db.scalars(
+            select(models.StandardResource).where(
+                models.StandardResource.source_id == source.id,
+                models.StandardResource.source_book_id == source_book_id,
+            )
+        ).first()
+    if resource is None and candidate.normalized_standard_no:
+        resource = db.scalars(
+            select(models.StandardResource)
+            .where(
+                models.StandardResource.source_id == source.id,
+                models.StandardResource.normalized_standard_no == candidate.normalized_standard_no,
+            )
+            .order_by(desc(models.StandardResource.id))
+        ).first()
+    if resource is None and candidate.detail_url:
+        resource = db.scalars(
+            select(models.StandardResource).where(
+                models.StandardResource.source_id == source.id,
+                models.StandardResource.detail_url == candidate.detail_url,
+            )
+        ).first()
+
+    number_parts = normalize_standard_no(candidate.standard_no or candidate.normalized_standard_no)
+    if resource is None:
+        resource = models.StandardResource(
+            source_id=source.id,
+            source_book_id=source_book_id,
+            source_name=source.source_name,
+            standard_name=candidate.standard_name or candidate.standard_no or "未命名标准",
+        )
+        db.add(resource)
+        db.flush()
+
+    resource.standard_no = candidate.standard_no or resource.standard_no
+    resource.raw_standard_no = number_parts.raw or resource.raw_standard_no
+    resource.normalized_standard_no = candidate.normalized_standard_no or number_parts.normalized or resource.normalized_standard_no
+    resource.standard_prefix = number_parts.prefix or resource.standard_prefix
+    resource.standard_main_no = number_parts.main_no or resource.standard_main_no
+    resource.standard_year = number_parts.year or resource.standard_year
+    resource.standard_revision_note = number_parts.revision_note or resource.standard_revision_note
+    resource.source_status_raw = candidate.source_status
+    resource.standard_name = candidate.standard_name or resource.standard_name
+    resource.source_status = candidate.source_status
+    resource.system_status = _system_status_from_source(candidate.source_status)
+    resource.publish_date = candidate.publish_date or resource.publish_date
+    resource.effective_date = candidate.effective_date or resource.effective_date
+    resource.abolish_date = candidate.abolish_date or resource.abolish_date
+    resource.detail_url = candidate.detail_url or resource.detail_url
+    resource.pdf_trial_url = candidate.pdf_trial_url or resource.pdf_trial_url
+    resource.source_confidence = source.trust_score
+    resource.last_synced_at = datetime.now(UTC)
+    resource.sync_status = "外网实时"
+    if candidate.match_reason and not resource.summary:
+        resource.summary = candidate.match_reason
+
+    if candidate.detail_url:
+        evidence_exists = db.scalars(
+            select(models.StandardEvidence).where(
+                models.StandardEvidence.standard_resource_id == resource.id,
+                models.StandardEvidence.source_url == candidate.detail_url,
+            )
+        ).first()
+        if evidence_exists is None:
+            db.add(
+                models.StandardEvidence(
+                    standard_resource_id=resource.id,
+                    source_name=source.source_name,
+                    source_level=source.trust_level,
+                    source_url=candidate.detail_url,
+                    raw_status_text=candidate.source_status,
+                    parsed_status=resource.system_status,
+                    page_summary=candidate.match_reason,
+                    evidence_note=f"{source.source_name} 外网实时搜索命中",
+                )
+            )
+
+    candidate.candidate_id = resource.id
+    return resource.id
+
+
 def _candidate_dedupe_key(candidate: models.LocalFileRecognitionCandidate) -> str | None:
     if candidate.detail_url:
         return candidate.detail_url
@@ -352,6 +465,18 @@ def run_external_search_for_task(db: Session, task_id: int) -> tuple[models.Loca
             existing_keys.add(key)
         added += 1
 
+    db.flush()
+    all_candidates = list(
+        db.scalars(
+            select(models.LocalFileRecognitionCandidate).where(models.LocalFileRecognitionCandidate.task_id == task.id)
+        )
+    )
+    decision, confidence, risk, reason = calculate_decision(all_candidates, task)
+    task.decision = decision
+    task.confidence_score = confidence
+    task.risk_level = risk
+    task.decision_reason = reason
+
     _append_log(
         db,
         task.id,
@@ -359,6 +484,14 @@ def run_external_search_for_task(db: Session, task_id: int) -> tuple[models.Loca
         "ok" if not errors else "partial",
         f"外网复核追加 {added} 条候选",
         {"added": added, "errors": errors},
+    )
+    _append_log(
+        db,
+        task.id,
+        "external_search_decision",
+        "ok",
+        reason,
+        {"decision": decision, "confidence": confidence, "risk": risk, "added": added},
     )
     db.commit()
     refreshed = get_intake_task_detail(db, task_id)
@@ -574,6 +707,8 @@ def confirm_intake_decision(
                 document_id = document_id or version.document_id
         elif candidate.candidate_type == "standard_resource":
             standard_resource_id = standard_resource_id or candidate.candidate_id
+            if standard_resource_id is None:
+                standard_resource_id = upsert_standard_resource_from_candidate(db, candidate)
 
     source = _create_local_url_source(db, task, standard_resource_id=standard_resource_id)
     _, storage_path = _archive_task_file(db, task, source)

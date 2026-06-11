@@ -155,7 +155,10 @@ def search_trusted_sources(
         if (key := _external_dedupe_key(item)) is not None
     }
 
-    source_query = select(models.TrustedSource).where(models.TrustedSource.adapter_key.is_not(None))
+    source_query = select(models.TrustedSource).where(
+        models.TrustedSource.enabled.is_(True),
+        models.TrustedSource.adapter_key.is_not(None),
+    )
     if source_id is not None:
         source_query = source_query.where(models.TrustedSource.id == source_id)
     sources = list(db.scalars(source_query.order_by(models.TrustedSource.id)))
