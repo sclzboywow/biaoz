@@ -44,6 +44,14 @@ from app.governance_dashboard_service import (
     supervision_summary_enhanced,
 )
 from app.ingest_runtime import ingest_runtime_summary
+from app.local_file_intake_service import (
+    analyze_local_file,
+    confirm_intake_decision,
+    create_intake_task,
+    delete_intake_task,
+    get_intake_task_detail,
+    list_intake_tasks_page,
+)
 from app.url_governance_actions import apply_url_governance_action, batch_url_governance_actions, batch_profile_url_sources
 from app.governance_decision_service import (
     governance_supervision_summary,
@@ -424,6 +432,98 @@ def list_collection_tasks(cursor: int | None = None, limit: int = 20, db: Sessio
 @api.get("/ingest-runtime/summary")
 def get_ingest_runtime_summary(interval_minutes: int = 30, db: Session = Depends(get_db)):
     return ingest_runtime_summary(db, min(max(interval_minutes, 1), 1440))
+
+
+@api.post("/local-file-intake/upload", response_model=schemas.LocalFileIntakeTaskOut)
+async def upload_local_file_intake(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    try:
+        return await create_intake_task(db, file)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@api.post("/local-file-intake/{task_id}/analyze", response_model=schemas.LocalFileIntakeDetailOut)
+def analyze_local_file_intake(task_id: int, db: Session = Depends(get_db)):
+    try:
+        analyze_local_file(db, task_id)
+        task = get_intake_task_detail(db, task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if task is None:
+        raise HTTPException(status_code=404, detail="识别任务不存在")
+    return schemas.LocalFileIntakeDetailOut(
+        task=schemas.LocalFileIntakeTaskOut.model_validate(task),
+        candidates=[schemas.LocalFileRecognitionCandidateOut.model_validate(item) for item in task.candidates],
+        logs=[schemas.LocalFileIntakeLogOut.model_validate(item) for item in task.logs],
+    )
+
+
+@api.get("/local-file-intake/page", response_model=schemas.LocalFileIntakePage)
+def page_local_file_intake(
+    page_size: int = 50,
+    cursor: int | None = None,
+    q: str | None = None,
+    recognition_status: str | None = None,
+    decision: str | None = None,
+    db: Session = Depends(get_db),
+):
+    items, total, next_cursor, has_more = list_intake_tasks_page(
+        db,
+        page_size=page_size,
+        cursor=cursor,
+        q=q,
+        recognition_status=recognition_status,
+        decision=decision,
+    )
+    return schemas.LocalFileIntakePage(
+        total=total,
+        items=[schemas.LocalFileIntakeTaskOut.model_validate(item) for item in items],
+        next_cursor=next_cursor,
+        has_more=has_more,
+    )
+
+
+@api.get("/local-file-intake/{task_id}", response_model=schemas.LocalFileIntakeDetailOut)
+def get_local_file_intake(task_id: int, db: Session = Depends(get_db)):
+    task = get_intake_task_detail(db, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="识别任务不存在")
+    return schemas.LocalFileIntakeDetailOut(
+        task=schemas.LocalFileIntakeTaskOut.model_validate(task),
+        candidates=[schemas.LocalFileRecognitionCandidateOut.model_validate(item) for item in task.candidates],
+        logs=[schemas.LocalFileIntakeLogOut.model_validate(item) for item in task.logs],
+    )
+
+
+@api.post("/local-file-intake/{task_id}/confirm", response_model=schemas.LocalFileIntakeConfirmResult)
+def confirm_local_file_intake(
+    task_id: int,
+    payload: schemas.LocalFileIntakeConfirmRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        result = confirm_intake_decision(
+            db,
+            task_id,
+            action=payload.action,
+            document_id=payload.document_id,
+            standard_resource_id=payload.standard_resource_id,
+            candidate_id=payload.candidate_id,
+            reviewed_by=payload.reviewed_by,
+            remark=payload.remark,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return schemas.LocalFileIntakeConfirmResult.model_validate(result)
+
+
+@api.delete("/local-file-intake/{task_id}")
+def delete_local_file_intake(task_id: int, db: Session = Depends(get_db)):
+    try:
+        delete_intake_task(db, task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True}
 
 
 @api.get("/documents", response_model=list[schemas.DocumentOut])

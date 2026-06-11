@@ -589,3 +589,77 @@ class CollectionTask(TimestampMixin, Base):
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class LocalFileIntakeTask(TimestampMixin, Base):
+    __tablename__ = "local_file_intake_tasks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    original_file_name: Mapped[str] = mapped_column(String(500), nullable=False)
+    temp_file_path: Mapped[str] = mapped_column(Text, nullable=False)
+    file_hash: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    file_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    file_type: Mapped[str | None] = mapped_column(String(40))
+    mime_type: Mapped[str | None] = mapped_column(String(120))
+    page_count: Mapped[int | None] = mapped_column(Integer)
+    extracted_text_sample: Mapped[str | None] = mapped_column(Text)
+    extracted_standard_no: Mapped[str | None] = mapped_column(String(160), index=True)
+    normalized_standard_no: Mapped[str | None] = mapped_column(String(160), index=True)
+    extracted_title: Mapped[str | None] = mapped_column(String(500))
+    extracted_publish_date: Mapped[date | None] = mapped_column(Date)
+    extracted_effective_date: Mapped[date | None] = mapped_column(Date)
+    recognition_status: Mapped[str] = mapped_column(String(40), default="pending", index=True)
+    decision: Mapped[str | None] = mapped_column(String(40), index=True)
+    confidence_score: Mapped[int | None] = mapped_column(Integer)
+    risk_level: Mapped[str | None] = mapped_column(String(20))
+    decision_reason: Mapped[str | None] = mapped_column(Text)
+    reviewed_by: Mapped[str | None] = mapped_column(String(120))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    final_action: Mapped[str | None] = mapped_column(String(40))
+    linked_document_id: Mapped[int | None] = mapped_column(ForeignKey("documents.id"), index=True)
+    linked_version_id: Mapped[int | None] = mapped_column(ForeignKey("document_versions.id"), index=True)
+
+    candidates: Mapped[list["LocalFileRecognitionCandidate"]] = relationship(
+        back_populates="task", cascade="all, delete-orphan"
+    )
+    logs: Mapped[list["LocalFileIntakeLog"]] = relationship(back_populates="task", cascade="all, delete-orphan")
+
+
+class LocalFileRecognitionCandidate(Base):
+    __tablename__ = "local_file_recognition_candidates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("local_file_intake_tasks.id"), nullable=False, index=True)
+    candidate_type: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    candidate_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    source_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    source_name: Mapped[str | None] = mapped_column(String(255))
+    standard_no: Mapped[str | None] = mapped_column(String(160))
+    normalized_standard_no: Mapped[str | None] = mapped_column(String(160))
+    standard_name: Mapped[str | None] = mapped_column(String(500))
+    source_status: Mapped[str | None] = mapped_column(String(80))
+    publish_date: Mapped[date | None] = mapped_column(Date)
+    effective_date: Mapped[date | None] = mapped_column(Date)
+    abolish_date: Mapped[date | None] = mapped_column(Date)
+    detail_url: Mapped[str | None] = mapped_column(Text)
+    pdf_trial_url: Mapped[str | None] = mapped_column(Text)
+    match_score: Mapped[int] = mapped_column(Integer, default=0)
+    match_reason: Mapped[str | None] = mapped_column(Text)
+    decision_advice: Mapped[str | None] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    task: Mapped["LocalFileIntakeTask"] = relationship(back_populates="candidates")
+
+
+class LocalFileIntakeLog(Base):
+    __tablename__ = "local_file_intake_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("local_file_intake_tasks.id"), nullable=False, index=True)
+    step_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    result: Mapped[str] = mapped_column(String(40), nullable=False)
+    message: Mapped[str | None] = mapped_column(Text)
+    detail_json: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    task: Mapped["LocalFileIntakeTask"] = relationship(back_populates="logs")

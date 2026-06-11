@@ -160,6 +160,89 @@ export type CollectionTask = {
   updated_at?: string
 }
 
+export type LocalFileIntakeTask = {
+  id: number
+  original_file_name: string
+  temp_file_path: string
+  file_hash: string
+  file_size: number
+  file_type?: string | null
+  mime_type?: string | null
+  page_count?: number | null
+  extracted_text_sample?: string | null
+  extracted_standard_no?: string | null
+  normalized_standard_no?: string | null
+  extracted_title?: string | null
+  extracted_publish_date?: string | null
+  extracted_effective_date?: string | null
+  recognition_status: string
+  decision?: string | null
+  confidence_score?: number | null
+  risk_level?: string | null
+  decision_reason?: string | null
+  reviewed_by?: string | null
+  reviewed_at?: string | null
+  final_action?: string | null
+  linked_document_id?: number | null
+  linked_version_id?: number | null
+  created_at: string
+  updated_at?: string | null
+}
+
+export type LocalFileRecognitionCandidate = {
+  id: number
+  task_id: number
+  candidate_type: string
+  candidate_id?: number | null
+  source_id?: number | null
+  source_name?: string | null
+  standard_no?: string | null
+  normalized_standard_no?: string | null
+  standard_name?: string | null
+  source_status?: string | null
+  publish_date?: string | null
+  effective_date?: string | null
+  abolish_date?: string | null
+  detail_url?: string | null
+  pdf_trial_url?: string | null
+  match_score: number
+  match_reason?: string | null
+  decision_advice?: string | null
+  created_at: string
+}
+
+export type LocalFileIntakeLog = {
+  id: number
+  task_id: number
+  step_name: string
+  result: string
+  message?: string | null
+  detail_json?: string | null
+  created_at: string
+}
+
+export type LocalFileIntakeDetail = {
+  task: LocalFileIntakeTask
+  candidates: LocalFileRecognitionCandidate[]
+  logs: LocalFileIntakeLog[]
+}
+
+export type LocalFileIntakePage = {
+  total: number
+  items: LocalFileIntakeTask[]
+  next_cursor?: number | null
+  has_more?: boolean
+}
+
+export type LocalFileIntakeConfirmPayload = {
+  action: 'ignore' | 'link_existing' | 'new_version' | 'create_document' | 'mark_review'
+  document_id?: number
+  standard_resource_id?: number
+  candidate_id?: number
+  reviewed_by?: string
+  remark?: string
+}
+
 export type IngestRuntimeWorker = {
   key: string
   name: string

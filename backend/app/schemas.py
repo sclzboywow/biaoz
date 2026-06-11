@@ -986,3 +986,95 @@ class UrlGovernanceBatchResultOut(BaseModel):
     dry_run: bool | None = None
     total: int | None = None
     profiled: int | None = None
+
+
+class LocalFileIntakeTaskOut(OrmModel):
+    id: int
+    original_file_name: str
+    temp_file_path: str
+    file_hash: str
+    file_size: int
+    file_type: str | None = None
+    mime_type: str | None = None
+    page_count: int | None = None
+    extracted_text_sample: str | None = None
+    extracted_standard_no: str | None = None
+    normalized_standard_no: str | None = None
+    extracted_title: str | None = None
+    extracted_publish_date: date | None = None
+    extracted_effective_date: date | None = None
+    recognition_status: str
+    decision: str | None = None
+    confidence_score: int | None = None
+    risk_level: str | None = None
+    decision_reason: str | None = None
+    reviewed_by: str | None = None
+    reviewed_at: datetime | None = None
+    final_action: str | None = None
+    linked_document_id: int | None = None
+    linked_version_id: int | None = None
+    created_at: datetime
+    updated_at: datetime | None = None
+
+
+class LocalFileRecognitionCandidateOut(OrmModel):
+    id: int
+    task_id: int
+    candidate_type: str
+    candidate_id: int | None = None
+    source_id: int | None = None
+    source_name: str | None = None
+    standard_no: str | None = None
+    normalized_standard_no: str | None = None
+    standard_name: str | None = None
+    source_status: str | None = None
+    publish_date: date | None = None
+    effective_date: date | None = None
+    abolish_date: date | None = None
+    detail_url: str | None = None
+    pdf_trial_url: str | None = None
+    match_score: int
+    match_reason: str | None = None
+    decision_advice: str | None = None
+    created_at: datetime
+
+
+class LocalFileIntakeLogOut(OrmModel):
+    id: int
+    task_id: int
+    step_name: str
+    result: str
+    message: str | None = None
+    detail_json: str | None = None
+    created_at: datetime
+
+
+class LocalFileIntakeDetailOut(BaseModel):
+    task: LocalFileIntakeTaskOut
+    candidates: list[LocalFileRecognitionCandidateOut]
+    logs: list[LocalFileIntakeLogOut]
+
+
+class LocalFileIntakePage(BaseModel):
+    total: int
+    items: list[LocalFileIntakeTaskOut]
+    next_cursor: int | None = None
+    has_more: bool = False
+
+
+class LocalFileIntakeConfirmRequest(BaseModel):
+    action: str
+    document_id: int | None = None
+    standard_resource_id: int | None = None
+    candidate_id: int | None = None
+    reviewed_by: str | None = None
+    remark: str | None = None
+
+
+class LocalFileIntakeConfirmResult(BaseModel):
+    ok: bool
+    action: str
+    task_id: int
+    document_id: int | None = None
+    version_id: int | None = None
+    linked_resources: int | None = None
