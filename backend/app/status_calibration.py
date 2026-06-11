@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.alerts import upsert_pending_alert
+from app.governance_automation import auto_resolve_status_calibration_alerts
 from app.standard_number import normalize_standard_no
 
 
@@ -204,7 +205,7 @@ def calibrate_resource_status(db: Session, resource: models.StandardResource) ->
                 )
             )
 
-        if is_conflict or suggested_status in {"来源确认废止", "疑似被替代"}:
+        if (is_conflict or suggested_status in {"来源确认废止", "疑似被替代"}) and is_conflict:
             upsert_pending_alert(
                 db,
                 alert_type="可信源状态冲突" if is_conflict else "可信源废止提醒",
@@ -218,7 +219,17 @@ def calibrate_resource_status(db: Session, resource: models.StandardResource) ->
                 document_id=document.id,
             )
             created_alerts += 1
-        elif document.manual_status is None and document.review_status != models.ReviewStatus.confirmed.value:
+        elif suggested_status in {"来源确认废止", "疑似被替代"} and not is_conflict:
+            pass
+        auto_resolve_status_calibration_alerts(
+            db,
+            resource=resource,
+            document=document,
+            old_status=old_status,
+            suggested_status=suggested_status,
+            is_conflict=is_conflict,
+        )
+        if document.manual_status is None and document.review_status != models.ReviewStatus.confirmed.value:
             document.valid_status = suggested_status
 
     return {"matches": len(matches), "sync_logs": created_logs, "alerts": created_alerts}

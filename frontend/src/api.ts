@@ -160,6 +160,45 @@ export type CollectionTask = {
   updated_at?: string
 }
 
+export type IngestRuntimeWorker = {
+  key: string
+  name: string
+  group: string
+  status: string
+  status_message: string
+  pid?: number | null
+  pid_alive?: boolean | null
+  cursor?: string | null
+  last_exit?: number | null
+  last_started?: string | null
+  last_finished?: string | null
+  log_mtime?: string | null
+  log_file: string
+  pid_file: string
+  summary?: Record<string, unknown> | null
+  upload_summary?: Record<string, unknown> | null
+  tail: string[]
+}
+
+export type IngestRuntimeChannel = {
+  channel: string
+  total: number
+  recent: number
+  on_baidu: number
+}
+
+export type IngestRuntimeSummary = {
+  reported_at: string
+  interval_minutes: number
+  log_root: string
+  status_counts: Record<string, number>
+  database: {
+    totals: Record<string, number>
+    channels: IngestRuntimeChannel[]
+  }
+  workers: IngestRuntimeWorker[]
+}
+
 export type TrustedSource = {
   id: number
   source_name: string

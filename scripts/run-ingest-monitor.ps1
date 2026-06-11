@@ -16,8 +16,9 @@ $python = Join-Path $repoRoot "backend\.venv\Scripts\python.exe"
 $reportScript = Join-Path $repoRoot "scripts\report_ingest_stats.py"
 $logDir = Join-Path $repoRoot "logs"
 $pidFile = Join-Path $logDir "ingest-monitor.pid"
-$outLog = Join-Path $logDir "ingest-monitor.out.log"
+$outLog = Join-Path $logDir "ingest-monitor.runtime.log"
 $errLog = Join-Path $logDir "ingest-monitor.err.log"
+$processOutLog = Join-Path $logDir "ingest-monitor.process.out.log"
 $textLog = Join-Path $logDir "ingest-monitor.log"
 $jsonlLog = Join-Path $logDir "ingest-monitor.jsonl"
 
@@ -92,7 +93,7 @@ if ($Background) {
 
     $proc = Start-Process -FilePath "powershell.exe" `
         -ArgumentList $argList `
-        -RedirectStandardOutput $outLog `
+        -RedirectStandardOutput $processOutLog `
         -RedirectStandardError $errLog `
         -WindowStyle Hidden `
         -PassThru

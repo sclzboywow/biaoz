@@ -31,6 +31,9 @@ def resolve_metadata_share(document_id: int) -> Dict[str, Any]:
                 "document": doc,
                 "pan_share_url": share["pan_share_url"],
                 "pan_extract_code": share.get("pan_extract_code") or "",
+                "period_days": share.get("period_days"),
+                "share_id": share.get("share_id"),
+                "pan_short_url": share.get("pan_short_url"),
             }
 
     init_library_db()

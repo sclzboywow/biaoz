@@ -22,6 +22,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app import models  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
+from app.governance_automation import standard_resource_ingest_eligibility_clause  # noqa: E402
 from app.settings_store import ensure_default_trusted_sources  # noqa: E402
 from app.baidu_upload_queue import flush_baidu_upload_queue, reset_baidu_upload_queue  # noqa: E402
 from ingest_spc_online_reading_file import (  # noqa: E402
@@ -132,6 +133,7 @@ def select_candidates(
                 models.StandardResource.detail_url.isnot(None),
                 models.StandardResource.detail_url != "",
             )
+            .where(standard_resource_ingest_eligibility_clause())
             .order_by(models.StandardResource.id)
             .limit(min(max(scan_limit, limit * 20, 200), 5000))
         )

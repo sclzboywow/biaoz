@@ -123,13 +123,18 @@ def format_search_results(items: List[dict]) -> str:
 
 
 def format_download_success(data: dict) -> str:
+    if data.get("message"):
+        return str(data["message"])
     doc = data.get("document") or {}
+    share = data.get("share") or {}
+    period = share.get("period_label") or "7天"
     lines = [
-        f"资料：{doc.get('code')} {doc.get('title')}",
+        "资料下载成功",
         "",
-        f"百度网盘：\n{data.get('pan_share_url')}",
-        "",
+        f"名称：{doc.get('code')} {doc.get('title')}".strip(),
+        f"链接：{data.get('pan_share_url')}",
         f"提取码：{data.get('pan_extract_code') or '无'}",
+        f"有效期：{period}",
         "",
     ]
     if data.get("free_download"):
@@ -199,12 +204,17 @@ def format_wallet(data: dict) -> str:
 
 
 def format_resend(data: dict) -> str:
+    if data.get("message"):
+        return "已为你重发最近一次下载链接：\n\n" + str(data["message"])
     doc = data.get("document") or {}
+    share = data.get("share") or {}
+    period = share.get("period_label") or "7天"
     return (
         "已为你重发最近一次下载链接：\n\n"
-        f"{doc.get('code')} {doc.get('title')}\n\n"
-        f"百度网盘：\n{data.get('pan_share_url')}\n\n"
-        f"提取码：{data.get('pan_extract_code') or '无'}"
+        f"名称：{doc.get('code')} {doc.get('title')}\n"
+        f"链接：{data.get('pan_share_url')}\n"
+        f"提取码：{data.get('pan_extract_code') or '无'}\n"
+        f"有效期：{period}"
     )
 
 

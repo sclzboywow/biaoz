@@ -43,6 +43,7 @@ from app.governance_dashboard_service import (
     ocr_tasks_summary,
     supervision_summary_enhanced,
 )
+from app.ingest_runtime import ingest_runtime_summary
 from app.url_governance_actions import apply_url_governance_action, batch_url_governance_actions, batch_profile_url_sources
 from app.governance_decision_service import (
     governance_supervision_summary,
@@ -70,7 +71,7 @@ from app.settings_store import (
 from app.standard_number import normalize_standard_no
 from app.status_calibration import calibrate_resource_status
 from app.trusted_source_adapters import TrustedSourceSyncOptions, registry
-from app.storage import check_storage_root, configured_storage_root, relative_storage_path, save_upload
+from app.storage import check_storage_root, configured_storage_root, iter_storage_roots, relative_storage_path, save_upload
 from app.url_checker import check_url_source
 
 settings = get_settings()
@@ -420,6 +421,11 @@ def list_collection_tasks(cursor: int | None = None, limit: int = 20, db: Sessio
     return list(db.scalars(statement.order_by(desc(models.CollectionTask.id)).limit(min(max(limit, 1), 100))))
 
 
+@api.get("/ingest-runtime/summary")
+def get_ingest_runtime_summary(interval_minutes: int = 30, db: Session = Depends(get_db)):
+    return ingest_runtime_summary(db, min(max(interval_minutes, 1), 1440))
+
+
 @api.get("/documents", response_model=list[schemas.DocumentOut])
 def list_documents(skip: int = 0, limit: int = 50, db: Session = Depends(get_db)):
     return crud.list_items(db, models.Document, skip, limit)
@@ -647,26 +653,19 @@ def page_document_versions(
 
 
 def resolve_document_version_file(db: Session, version: models.DocumentVersion) -> Path:
-    storage_root = configured_storage_root(db, settings.storage_root).resolve()
     raw_path = Path(version.file_path)
     if raw_path.is_absolute():
         resolved = raw_path.resolve()
-        try:
-            resolved.relative_to(storage_root)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail="File path is outside the configured storage root.") from exc
-        if resolved.exists() and resolved.is_file():
-            return resolved
+        for root in iter_storage_roots(db, settings.storage_root):
+            try:
+                resolved.relative_to(root)
+            except ValueError:
+                continue
+            if resolved.exists() and resolved.is_file():
+                return resolved
         raise HTTPException(status_code=404, detail="Archived file does not exist.")
 
-    roots = [storage_root]
-    fallback_roots = get_setting(db, "storage_fallback_roots", "") or ""
-    for item in fallback_roots.split(";"):
-        item = item.strip()
-        if item:
-            roots.append(Path(item).expanduser().resolve())
-
-    for root in roots:
+    for root in iter_storage_roots(db, settings.storage_root):
         resolved = (root / raw_path).resolve()
         try:
             resolved.relative_to(root)

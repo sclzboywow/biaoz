@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.alerts import upsert_pending_alert
+from app.governance_automation import auto_resolve_governance_decision_alerts
 from app.governance_decision_engine import (
     DECISION_AUTO_CONFIRMED,
     DECISION_AUTO_DOWNGRADED,
@@ -209,6 +210,12 @@ def run_governance_decisions(
                         risk_level=result.risk_level,
                         dedupe_key=result.dedupe_key,
                         document_id=document_id,
+                    )
+                else:
+                    auto_resolve_governance_decision_alerts(
+                        db,
+                        resource=resource,
+                        decision=result.decision,
                     )
 
             log_governance_decision_audit(

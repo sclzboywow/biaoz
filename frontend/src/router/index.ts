@@ -24,6 +24,7 @@ const routes: RouteRecordRaw[] = [
 
       // 采集归档
       { path: 'collection/tasks', name: 'collection-tasks', component: () => import('../views/collection/CollectionTasksView.vue'), meta: { title: '文件采集任务', module: 'collection' } },
+      { path: 'collection/runtime', name: 'ingest-runtime', component: () => import('../views/collection/IngestRuntimeView.vue'), meta: { title: '采集运行控制台', module: 'collection' } },
       { path: 'collection/ocr-queue', name: 'ocr-queue', component: () => import('../views/collection/OcrDownloadQueueView.vue'), meta: { title: 'OCR 下载队列', module: 'collection' } },
       { path: 'collection/file-objects', name: 'file-objects', component: () => import('../views/collection/FileObjectLibraryView.vue'), meta: { title: '文件对象库', module: 'collection' } },
       { path: 'collection/archive', name: 'file-archive', component: () => import('../views/collection/DocumentArchiveView.vue'), meta: { title: '文件归档库', module: 'collection' } },

@@ -51,6 +51,16 @@ Start-BackgroundLoop `
     -ScriptPath (Join-Path $repoRoot "scripts\run-spc-metadata-slices-loop.ps1") `
     -ScriptArgs (@("-Pages", "$SpcPages", "-Workers", "$SpcWorkers") + $onceArg)
 
+Start-BackgroundLoop `
+    -Name "governance-loop" `
+    -ScriptPath (Join-Path $repoRoot "scripts\run-governance-loop.ps1") `
+    -ScriptArgs (@("-ProfileLimit", "5000", "-DecisionLimit", "5000", "-OcrTaskLimit", "500", "-AlertSweepLimit", "3000", "-CycleSleepSeconds", "900") + $onceArg)
+
+Start-BackgroundLoop `
+    -Name "ocr-worker" `
+    -ScriptPath (Join-Path $repoRoot "scripts\run-ocr-worker-loop.ps1") `
+    -ScriptArgs $onceArg
+
 $guojiScript = Join-Path $repoRoot "scripts\run-guojiabiaozhun-sync.ps1"
 $guojiPidFile = Join-Path $logDir "guojiabiaozhun-sync.pid"
 $guojiLauncherPid = Ensure-LoopPidFile -PidPath (Join-Path $logDir "guojiabiaozhun-sync-launcher.pid") -ScriptPath $guojiScript
@@ -62,4 +72,4 @@ if ($null -ne $guojiLauncherPid -and (Get-Process -Id $guojiLauncherPid -ErrorAc
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $guojiScript @guojiArgs | ForEach-Object { Write-Output "[guojiabiaozhun-sync] $_" }
 }
 
-Write-Output "Metadata ingest loops launched (trusted-sources/spc-slices/guojiabiaozhun)."
+Write-Output "Metadata ingest loops launched (trusted-sources/spc-slices/governance/ocr-worker/guojiabiaozhun)."

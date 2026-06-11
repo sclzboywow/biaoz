@@ -585,8 +585,8 @@ async def internal_qq_file_send_group(
     x_internal_secret: Optional[str] = Header(default=None, alias="X-Internal-Secret"),
 ):
     """
-    向群发送文件。
-    payload: { group_id, file_path, intro_text?, mode?: chat|folder, file_name? }
+    向群聊天窗口发送文件（不走群文件盘，用户可见）。
+    payload: { group_id, file_path, intro_text?, file_name? }
     """
     _require_internal_secret(x_internal_secret)
     group_id = payload.get("group_id")
@@ -594,19 +594,39 @@ async def internal_qq_file_send_group(
     if not group_id or not file_path:
         raise HTTPException(status_code=400, detail="group_id and file_path are required")
 
-    mode = str(payload.get("mode") or "chat").strip().lower()
-    if mode not in {"chat", "folder"}:
-        raise HTTPException(status_code=400, detail="mode must be chat or folder")
-
     api = get_qq_file_api()
     result = await api.send_group_file(
         group_id=group_id,
         file_path=file_path,
         intro_text=(payload.get("intro_text") or None),
-        mode=mode,
+        mode="chat",
         file_name=(payload.get("file_name") or None),
     )
-    return {"status": "ok", "result": result.to_dict()}
+    from cache_cleanup import cleanup_local_cache
+
+    cleanup = cleanup_local_cache()
+    return {"status": "ok", "result": result.to_dict(), "cache_cleanup": cleanup}
+
+
+@app.post("/internal/send-group-msg")
+async def internal_send_group_msg(
+    payload: Dict[str, Any],
+    x_internal_secret: Optional[str] = Header(default=None, alias="X-Internal-Secret"),
+):
+    """向群发送文本消息。payload: { group_id, text | message }"""
+    _require_internal_secret(x_internal_secret)
+    group_id = payload.get("group_id")
+    text = (payload.get("text") or payload.get("message") or "").strip()
+    if not group_id or not text:
+        raise HTTPException(status_code=400, detail="group_id and text are required")
+
+    if _bot_ws and _bot_send_lock:
+        await send_group_msg(_bot_ws, _bot_send_lock, group_id, text)
+        return {"status": "ok", "via": "onebot_ws"}
+
+    api = get_qq_file_api()
+    data = await api.client.call_api("send_group_msg", {"group_id": int(group_id), "message": text})
+    return {"status": "ok", "via": "napcat_http", "data": data}
 
 
 @app.post("/internal/qq-file/send-private")

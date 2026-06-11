@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from datetime import UTC, datetime, timedelta
@@ -11,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BACKEND = ROOT / "backend"
 LOG_DIR = ROOT / "logs"
 sys.path.insert(0, str(BACKEND))
+os.chdir(BACKEND)
 
 from sqlalchemy import text
 

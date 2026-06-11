@@ -210,27 +210,6 @@ def lookup_metadata_document(public_id: int) -> dict[str, Any] | None:
 
 
 def create_baidu_share_link(fs_id: str) -> dict[str, str] | None:
-    access_token = os.getenv("BAIDU_NETDISK_ACCESS_TOKEN", "").strip()
-    if not access_token or not fs_id:
-        return None
-    try:
-        import requests
-    except ImportError:
-        return None
+    from .baidu_client import create_share_link
 
-    resp = requests.post(
-        "https://pan.baidu.com/rest/2.0/xpan/share",
-        params={"method": "set", "access_token": access_token},
-        data={"fid_list": f"[{fs_id}]", "period": 7, "schannel": 4, "channel_list": "[]"},
-        timeout=20,
-    )
-    if resp.status_code != 200:
-        return None
-    payload = resp.json()
-    if payload.get("errno") not in (0, None):
-        return None
-    link = str(payload.get("link") or "")
-    if not link:
-        return None
-    pwd = str(payload.get("pwd") or payload.get("password") or "")
-    return {"pan_share_url": link, "pan_extract_code": pwd}
+    return create_share_link(fs_id)

@@ -82,6 +82,8 @@ def pending_version_ids(limit: int | None, current_only: bool, version_ids: list
         for version_id, file_path, remark in query.all():
             if version_has_baidu_pan(file_path=file_path, remark=remark):
                 continue
+            if not file_path or resolve_local_file(db, file_path) is None:
+                continue
             pending.append(version_id)
             if limit and len(pending) >= limit:
                 break

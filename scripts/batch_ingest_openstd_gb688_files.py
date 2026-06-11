@@ -33,6 +33,7 @@ from app.gb688_captcha_download import (
     extract_hcno,
 )
 from app.samr_std_sync import _download_url
+from app.governance_automation import standard_resource_ingest_eligibility_clause
 from app.settings_store import ensure_default_settings
 from app.storage import check_storage_root, configured_storage_root
 
@@ -119,6 +120,7 @@ def select_candidates(
         statement = (
             select(models.StandardResource)
             .where(models.StandardResource.source_id == source_id)
+            .where(standard_resource_ingest_eligibility_clause())
             .order_by(models.StandardResource.id)
             .limit(max(limit, 1))
         )

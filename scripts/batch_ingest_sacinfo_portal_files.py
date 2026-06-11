@@ -26,6 +26,7 @@ from app import models
 from app.config import get_settings
 from app.database import SessionLocal
 from app.download_service import archive_downloaded_content
+from app.governance_automation import standard_resource_ingest_eligibility_clause
 from baidu_upload_batch import add_baidu_upload_args, init_baidu_upload_workers, log_baidu_upload_summary  # noqa: E402
 from app.samr_portal_captcha_download import (
     SamrPortalCaptchaError,
@@ -118,6 +119,7 @@ def select_candidates(
         statement = (
             select(models.StandardResource)
             .where(models.StandardResource.source_id == source_id)
+            .where(standard_resource_ingest_eligibility_clause())
             .order_by(models.StandardResource.id)
             .limit(max(limit * 30, limit, 1))
         )

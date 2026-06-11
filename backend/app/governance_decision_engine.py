@@ -11,6 +11,17 @@ from sqlalchemy.orm import Session
 from app import models
 from app.standard_number import normalize_standard_no
 
+TRUSTED_FILE_ADAPTER_KEYS = frozenset(
+    {
+        "samr_gb_all_public",
+        "spc_standard_online",
+        "samr_industry_standard_public",
+        "samr_local_standard_public",
+        "samr_enterprise_standard_public",
+        "samr_std_public",
+    }
+)
+
 DECISION_AUTO_CONFIRMED = "AUTO_CONFIRMED"
 DECISION_AUTO_MERGED = "AUTO_MERGED"
 DECISION_AUTO_DOWNGRADED = "AUTO_DOWNGRADED"
@@ -415,6 +426,14 @@ def make_governance_decision(bundle: EvidenceBundle) -> GovernanceDecisionResult
     }
     triggered_review = [item for item in conflicts if item.conflict_type in need_review_types]
 
+    trusted_source = bundle.trusted_source
+    adapter_key = (trusted_source.adapter_key or "").strip() if trusted_source else ""
+    is_trusted_channel = bool(
+        trusted_source
+        and trusted_source.enabled
+        and adapter_key in TRUSTED_FILE_ADAPTER_KEYS
+    )
+
     if not resource_no and not resource.standard_name:
         return GovernanceDecisionResult(
             decision=DECISION_AUTO_REJECTED,
@@ -445,6 +464,47 @@ def make_governance_decision(bundle: EvidenceBundle) -> GovernanceDecisionResult
             alert_message=primary.message,
             dedupe_key=f"governance:{resource.id}:{primary.conflict_type}",
         )
+
+    if is_trusted_channel and not high_conflicts:
+        trusted_metadata_confirm = (
+            bool(resource_no)
+            and status in CLEAR_STATUSES
+            and confidence >= 70
+            and bundle.name_similarity >= 70
+            and not bundle.document_versions
+        )
+        if trusted_metadata_confirm:
+            return GovernanceDecisionResult(
+                decision=DECISION_AUTO_CONFIRMED,
+                confidence_score=confidence,
+                decision_reason="可信源元数据已同步，待文件线程入库",
+                evidence_count=len(bundle.evidence_rows),
+                highest_source_level=level,
+                highest_source_weight=bundle.highest_source_weight,
+                conflict_count=len(conflicts),
+                risk_level=RISK_LOW,
+                conflicts=conflicts,
+            )
+
+        trusted_file_confirm = (
+            bool(resource_no)
+            and status in CLEAR_STATUSES
+            and confidence >= 70
+            and bundle.name_similarity >= 70
+            and bool(bundle.document_versions)
+        )
+        if trusted_file_confirm:
+            return GovernanceDecisionResult(
+                decision=DECISION_AUTO_CONFIRMED,
+                confidence_score=confidence,
+                decision_reason="可信源通道，编号/名称/状态一致且已归档",
+                evidence_count=len(bundle.evidence_rows),
+                highest_source_level=level,
+                highest_source_weight=bundle.highest_source_weight,
+                conflict_count=len(conflicts),
+                risk_level=RISK_LOW,
+                conflicts=conflicts,
+            )
 
     auto_confirm = (
         level in HIGH_TRUST_LEVELS

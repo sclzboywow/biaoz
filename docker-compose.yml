@@ -1,7 +1,10 @@
-# 单一数据库策略：所有服务共用宿主机 PostgreSQL（与 backend/.env 中 localhost:5432 为同一实例）。
-# 容器内通过 host.docker.internal 访问；请勿再使用 compose 内置 postgres 卷，避免「双库」混淆。
-#
-# 前置条件：本机 PostgreSQL 已运行，且存在库 biaoz（账号见下方 DATABASE_URL）。
+# 单一数据库 + 单一存储：Docker 服务连宿主机 PostgreSQL 与 G: 盘归档目录。
+# 前置条件：本机 PostgreSQL(biaoz) 已运行；G:/data/standard-docs 可访问。
+
+x-storage: &storage_mount
+  type: bind
+  source: G:/data/standard-docs
+  target: /data/standard-docs
 
 services:
   api:
@@ -15,10 +18,12 @@ services:
       STORAGE_ROOT: ${STORAGE_ROOT:-/data/standard-docs}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
       COLLECTION_TASK_INLINE_WORKER: ${COLLECTION_TASK_INLINE_WORKER:-false}
+      INGEST_LOG_ROOT: /app/logs
     ports:
       - "8000:8000"
     volumes:
-      - document_storage:/data/standard-docs
+      - *storage_mount
+      - ./logs:/app/logs:ro
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)\""]
       interval: 10s
@@ -49,7 +54,7 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://biaoz:biaoz@host.docker.internal:5432/biaoz}
       STORAGE_ROOT: ${STORAGE_ROOT:-/data/standard-docs}
     volumes:
-      - document_storage:/data/standard-docs
+      - *storage_mount
     depends_on:
       api:
         condition: service_healthy
@@ -65,7 +70,7 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://biaoz:biaoz@host.docker.internal:5432/biaoz}
       STORAGE_ROOT: ${STORAGE_ROOT:-/data/standard-docs}
     volumes:
-      - document_storage:/data/standard-docs
+      - *storage_mount
     depends_on:
       api:
         condition: service_healthy
@@ -76,7 +81,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      DB_TYPE: postgresdb
+      DB_TYPE: ${N8N_DB_TYPE:-sqlite}
       DB_POSTGRESDB_HOST: host.docker.internal
       DB_POSTGRESDB_PORT: 5432
       DB_POSTGRESDB_DATABASE: ${N8N_POSTGRES_DB:-n8n}
@@ -94,8 +99,7 @@ services:
       - "5678:5678"
     volumes:
       - n8n_data:/home/node/.n8n
-      - document_storage:/data/standard-docs
+      - *storage_mount
 
 volumes:
   n8n_data:
-  document_storage:

@@ -349,7 +349,14 @@ def profile_url_sources_batch(
         detail={"run_id": run.id, **stats},
     )
 
-    result = {"total": len(rows), **stats, "dry_run": dry_run, "run_id": run.id, "failed": failed}
+    result = {
+        "total": len(rows),
+        **stats,
+        "dry_run": dry_run,
+        "run_id": run.id,
+        "failed": failed,
+        "last_url_source_id": rows[-1].id if rows else after_id,
+    }
     if dry_run:
         db.rollback()
         result["run_id"] = None

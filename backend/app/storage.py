@@ -1,4 +1,6 @@
 import hashlib
+import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -7,6 +9,8 @@ from fastapi import UploadFile
 from sqlalchemy.orm import Session
 
 from app.settings_store import get_bool_setting, get_setting
+
+_WINDOWS_DRIVE_PATH_RE = re.compile(r"^[A-Za-z]:[/\\]")
 
 
 @dataclass
@@ -21,20 +25,51 @@ class StorageStatus:
     message: str
 
 
+def is_windows_drive_path(value: str | None) -> bool:
+    return bool(value and _WINDOWS_DRIVE_PATH_RE.match(value.strip()))
+
+
+def configured_storage_root(db: Session, fallback: Path) -> Path:
+    raw_value = get_setting(db, "storage_root", str(fallback)) or str(fallback)
+    if is_windows_drive_path(raw_value) and os.name != "nt":
+        return fallback.expanduser().resolve()
+    root = Path(raw_value).expanduser()
+    if root.is_absolute():
+        return root.resolve()
+    return (Path.cwd() / root).resolve()
+
+
+def iter_storage_roots(db: Session, fallback: Path) -> list[Path]:
+    roots: list[Path] = []
+    seen: set[str] = set()
+
+    def add(path: Path) -> None:
+        try:
+            resolved = path.expanduser().resolve()
+        except OSError:
+            resolved = path.expanduser()
+        key = str(resolved)
+        if key in seen:
+            return
+        seen.add(key)
+        roots.append(resolved)
+
+    add(configured_storage_root(db, fallback))
+    add(fallback.expanduser())
+    raw_fallbacks = get_setting(db, "storage_fallback_roots", "") or ""
+    for item in raw_fallbacks.split(";"):
+        item = item.strip()
+        if item:
+            add(Path(item))
+    return roots
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as file_obj:
         for chunk in iter(lambda: file_obj.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def configured_storage_root(db: Session, fallback: Path) -> Path:
-    raw_value = get_setting(db, "storage_root", str(fallback)) or str(fallback)
-    root = Path(raw_value).expanduser()
-    if root.is_absolute():
-        return root
-    return (Path.cwd() / root).resolve()
 
 
 def check_storage_root(db: Session, fallback: Path) -> StorageStatus:

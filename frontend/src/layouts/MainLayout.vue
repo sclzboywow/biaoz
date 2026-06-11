@@ -66,6 +66,7 @@ const activeMenu = computed(() => route.path)
         <el-sub-menu index="collection">
           <template #title><el-icon><Download /></el-icon><span>采集归档</span></template>
           <el-menu-item index="/collection/tasks"><el-icon><Download /></el-icon><span>文件采集任务</span></el-menu-item>
+          <el-menu-item index="/collection/runtime"><el-icon><Monitor /></el-icon><span>采集运行控制台</span></el-menu-item>
           <el-menu-item index="/collection/ocr-queue"><el-icon><Reading /></el-icon><span>OCR 下载队列</span></el-menu-item>
           <el-menu-item index="/collection/file-objects"><el-icon><Box /></el-icon><span>文件对象库</span></el-menu-item>
           <el-menu-item index="/collection/archive"><el-icon><Document /></el-icon><span>文件归档库</span></el-menu-item>

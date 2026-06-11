@@ -389,10 +389,10 @@ def create_ticket_order(qq_user_id: str, group_id: str, pack_code: str) -> Dict[
     conn.commit()
     conn.close()
 
-    from services.payment_service import create_alipay_page_pay
+    from services.payment_service import create_alipay_pay
 
     amount_yuan = round(pack["amount_cent"] / 100.0, 2)
-    pay_res = create_alipay_page_pay(
+    pay_res = create_alipay_pay(
         subject=f"下载券-{pack['name']}",
         total_amount=amount_yuan,
         out_trade_no=order_no,
@@ -401,6 +401,11 @@ def create_ticket_order(qq_user_id: str, group_id: str, pack_code: str) -> Dict[
         return {"success": False, "message": pay_res.get("message", "创建支付失败")}
 
     pay_url = pay_res["pay_url"]
+    if pay_res.get("trade_method") == "precreate" and "qr.alipay.com" not in pay_url:
+        return {
+            "success": False,
+            "message": pay_res.get("message") or "当面付二维码生成失败，请稍后重试",
+        }
     conn = sqlite3.connect(get_library_db_path())
     cur = conn.cursor()
     cur.execute(

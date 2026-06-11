@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app import models, schemas
 from app.alerts import create_operational_alert
+from app.governance_automation import auto_resolve_ingest_success_alerts
 from app.governance_service import log_process_audit
 from app.baidu_pan_storage import BaiduPanClient, BaiduPanError, append_baidu_pan_sync_remark, build_baidu_pan_sync_payload, load_baidu_pan_config
 from app.standard_number import normalize_standard_no
@@ -437,6 +438,12 @@ def archive_downloaded_content(
     from app.status_calibration import link_archived_document_to_resources
 
     link_archived_document_to_resources(db, document=document, source=source)
+    auto_resolve_ingest_success_alerts(
+        db,
+        document=document,
+        source=source,
+        change_type=change_type,
+    )
     db.commit()
     db.refresh(version)
     if queued_baidu_upload:
@@ -448,7 +455,8 @@ def archive_downloaded_content(
             file_name=file_name,
             content=downloaded.content,
         )
-    db.refresh(alert)
+    if alert is not None:
+        db.refresh(alert)
 
     return schemas.UrlCheckResult(
         source_id=source.id,
