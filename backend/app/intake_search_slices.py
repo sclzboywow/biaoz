@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 
 from app.standard_number import (
+    ATLAS_CODE_PATTERN,
+    DRAWING_CODE_PATTERN,
     canonicalize_standard_no_text,
     extract_standard_no_from_text,
     normalize_standard_no,
@@ -10,8 +12,6 @@ from app.standard_number import (
 from app.storage import safe_stem, safe_upload_filename
 from app.trusted_source_adapters import TrustedSourceSearchQuery
 
-ATLAS_CODE_PATTERN = re.compile(r"\d{2}[A-Z]\d{2,4}", re.I)
-DRAWING_CODE_PATTERN = re.compile(r"\d{2}S\d{3}", re.I)
 TOKEN_SPLIT_PATTERN = re.compile(r"[\s_\-－—,，;；]+")
 NOISE_TOKENS = {
     "scan",
@@ -137,3 +137,52 @@ def build_intake_search_queries(
         _add_query(queries, seen, standard_name=stem, keywords=_title_tokens(stem))
 
     return queries[:max_slices]
+
+
+def collect_intake_match_numbers(
+    *,
+    original_file_name: str | None,
+    extracted_standard_no: str | None = None,
+    normalized_standard_no: str | None = None,
+    extracted_title: str | None = None,
+) -> list[str]:
+    """Collect deduplicated standard/atlas numbers for local document/resource matching."""
+    numbers: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str | None) -> None:
+        if not value:
+            return
+        token = value.strip()
+        if not token or token in seen:
+            return
+        seen.add(token)
+        numbers.append(token)
+
+    for value in (extracted_standard_no, normalized_standard_no):
+        add(value)
+        if value:
+            add(normalize_standard_no(value).normalized)
+
+    safe_name = safe_upload_filename(original_file_name)
+    stem = safe_stem(safe_name)
+    for text in [stem, safe_name, original_file_name, extracted_title]:
+        if not text:
+            continue
+        standard_no = extract_standard_no_from_text(text)
+        if not standard_no:
+            continue
+        add(standard_no)
+        add(normalize_standard_no(standard_no).normalized)
+
+    for query in build_intake_search_queries(
+        original_file_name=original_file_name,
+        extracted_standard_no=extracted_standard_no,
+        normalized_standard_no=normalized_standard_no,
+        extracted_title=extracted_title,
+    ):
+        for value in [query.standard_no, query.normalized_standard_no, *query.keywords]:
+            if value and re.fullmatch(r"[A-Z0-9./-]{3,}", str(value), flags=re.I):
+                add(str(value).upper())
+
+    return numbers

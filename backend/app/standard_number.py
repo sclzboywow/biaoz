@@ -41,6 +41,9 @@ STANDARD_NO_IN_TEXT_PATTERN = re.compile(
     re.I,
 )
 
+DRAWING_CODE_PATTERN = re.compile(r"\d{2}S\d{3}", re.I)
+ATLAS_CODE_PATTERN = re.compile(r"\d{2}[A-Z]\d{2,4}", re.I)
+
 
 def _extract_revision_note(raw: str) -> tuple[str, str | None]:
     match = re.search(r"(\(.+?\)|\uff08.+?\uff09)", raw)
@@ -106,11 +109,22 @@ def canonicalize_standard_no_text(text: str) -> str:
     return value
 
 
+def extract_atlas_code_from_text(text: str | None) -> str | None:
+    if not text:
+        return None
+    canonical = canonicalize_standard_no_text(text).upper()
+    for pattern in (DRAWING_CODE_PATTERN, ATLAS_CODE_PATTERN):
+        match = pattern.search(canonical)
+        if match:
+            return match.group(0).upper()
+    return None
+
+
 def extract_standard_no_from_text(text: str | None) -> str | None:
     if not text:
         return None
     canonical = canonicalize_standard_no_text(text)
     match = STANDARD_NO_IN_TEXT_PATTERN.search(canonical)
-    if not match:
-        return None
-    return re.sub(r"\s+", " ", match.group(0)).strip()
+    if match:
+        return re.sub(r"\s+", " ", match.group(0)).strip()
+    return extract_atlas_code_from_text(canonical)

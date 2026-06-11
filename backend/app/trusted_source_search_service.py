@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from difflib import SequenceMatcher
 
 from sqlalchemy import desc, or_, select
@@ -79,7 +80,12 @@ def search_standard_resources_index(
     if not filters and query.keywords:
         for keyword in query.keywords[:5]:
             keyword = keyword.strip()
-            if keyword:
+            if not keyword:
+                continue
+            if re.fullmatch(r"[A-Z0-9./-]{3,}", keyword, flags=re.I):
+                filters.append(models.StandardResource.standard_no.ilike(keyword))
+                filters.append(models.StandardResource.normalized_standard_no.ilike(keyword))
+            else:
                 filters.append(models.StandardResource.standard_name.ilike(f"%{keyword[:40]}%"))
     if not filters:
         return []

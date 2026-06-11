@@ -28,7 +28,7 @@ from app.storage import (
     safe_upload_filename,
     sha256_file,
 )
-from app.intake_search_slices import build_intake_search_queries
+from app.intake_search_slices import build_intake_search_queries, collect_intake_match_numbers
 from app.trusted_source_adapters import TrustedSourceSearchQuery
 from app.trusted_source_search_service import search_trusted_sources, search_trusted_sources_sliced
 
@@ -222,57 +222,66 @@ def match_existing_versions(db: Session, task: models.LocalFileIntakeTask) -> li
     return candidates
 
 
-def match_existing_documents(db: Session, task: models.LocalFileIntakeTask) -> list[models.LocalFileRecognitionCandidate]:
-    if not task.normalized_standard_no and not task.extracted_standard_no:
-        return []
+def _match_numbers_for_task(task: models.LocalFileIntakeTask) -> list[str]:
+    return collect_intake_match_numbers(
+        original_file_name=task.original_file_name,
+        extracted_standard_no=task.extracted_standard_no,
+        normalized_standard_no=task.normalized_standard_no,
+        extracted_title=task.extracted_title,
+    )
 
-    number = task.normalized_standard_no or normalize_standard_no(task.extracted_standard_no).normalized
-    if not number:
+
+def match_existing_documents(db: Session, task: models.LocalFileIntakeTask) -> list[models.LocalFileRecognitionCandidate]:
+    numbers = _match_numbers_for_task(task)
+    if not numbers:
         return []
 
     candidates: list[models.LocalFileRecognitionCandidate] = []
-    for document in db.scalars(
-        select(models.Document).where(
-            or_(
-                models.Document.normalized_standard_no == number,
-                models.Document.standard_no == task.extracted_standard_no,
+    seen_document_ids: set[int] = set()
+    for number in numbers:
+        normalized = normalize_standard_no(number).normalized or number
+        filters = [
+            models.Document.normalized_standard_no == normalized,
+            models.Document.standard_no == number,
+            func.upper(models.Document.standard_no) == number.upper(),
+        ]
+        for document in db.scalars(
+            select(models.Document)
+            .where(or_(*filters))
+            .order_by(desc(models.Document.updated_at), desc(models.Document.id))
+            .limit(10)
+        ):
+            if document.id in seen_document_ids:
+                continue
+            seen_document_ids.add(document.id)
+            title_score = _similarity(task.extracted_title, document.title)
+            advice = "link_existing" if title_score >= 60 else "need_review"
+            candidates.append(
+                models.LocalFileRecognitionCandidate(
+                    task_id=task.id,
+                    candidate_type="document",
+                    candidate_id=document.id,
+                    source_name="本地标准文件",
+                    standard_no=document.standard_no,
+                    normalized_standard_no=document.normalized_standard_no,
+                    standard_name=document.title,
+                    source_status=document.valid_status,
+                    publish_date=document.publish_date,
+                    effective_date=document.effective_date,
+                    match_score=max(85, title_score) if title_score >= 80 else max(70, title_score),
+                    match_reason=f"标准编号一致（{number}），标题相似度 {title_score}%",
+                    decision_advice=advice,
+                )
             )
-        )
-        .order_by(desc(models.Document.updated_at), desc(models.Document.id))
-        .limit(10)
-    ):
-        title_score = _similarity(task.extracted_title, document.title)
-        advice = "link_existing" if title_score >= 60 else "need_review"
-        candidates.append(
-            models.LocalFileRecognitionCandidate(
-                task_id=task.id,
-                candidate_type="document",
-                candidate_id=document.id,
-                source_name="本地标准文件",
-                standard_no=document.standard_no,
-                normalized_standard_no=document.normalized_standard_no,
-                standard_name=document.title,
-                source_status=document.valid_status,
-                publish_date=document.publish_date,
-                effective_date=document.effective_date,
-                match_score=max(70, title_score),
-                match_reason=f"标准编号一致（{number}），标题相似度 {title_score}%",
-                decision_advice=advice,
-            )
-        )
     return candidates
 
 
 def match_standard_resources(db: Session, task: models.LocalFileIntakeTask) -> list[models.LocalFileRecognitionCandidate]:
-    query = TrustedSourceSearchQuery(
-        standard_no=task.extracted_standard_no,
-        normalized_standard_no=task.normalized_standard_no,
-        standard_name=task.extracted_title,
-    )
-    if not (query.standard_no or query.normalized_standard_no or query.standard_name):
+    queries = _intake_search_slices_for_task(task)
+    if not queries:
         return []
 
-    results = search_trusted_sources(db, query, include_external=False, limit=20)
+    results = search_trusted_sources_sliced(db, queries, include_external=False, limit=20)
     return [_candidate_from_search_result(task, item, search_backend="local_index") for item in results]
 
 
@@ -716,12 +725,28 @@ def _archive_task_file(db: Session, task: models.LocalFileIntakeTask, source: mo
     return target, relative_storage_path(storage_status.root, target)
 
 
-def _apply_standard_fields(document: models.Document, task: models.LocalFileIntakeTask) -> None:
-    parts = normalize_standard_no(task.extracted_standard_no)
-    document.title = task.extracted_title or task.original_file_name
-    document.standard_no = parts.raw or task.extracted_standard_no
+def _apply_standard_fields(
+    document: models.Document,
+    task: models.LocalFileIntakeTask,
+    *,
+    candidate: models.LocalFileRecognitionCandidate | None = None,
+) -> None:
+    standard_no = task.extracted_standard_no
+    normalized_standard_no = task.normalized_standard_no
+    title = task.extracted_title or task.original_file_name
+    if candidate:
+        if candidate.standard_no:
+            standard_no = candidate.standard_no
+        if candidate.normalized_standard_no:
+            normalized_standard_no = candidate.normalized_standard_no
+        if candidate.standard_name:
+            title = candidate.standard_name
+
+    parts = normalize_standard_no(standard_no)
+    document.title = title
+    document.standard_no = parts.raw or standard_no
     document.raw_standard_no = parts.raw
-    document.normalized_standard_no = parts.normalized or task.normalized_standard_no
+    document.normalized_standard_no = parts.normalized or normalized_standard_no
     document.standard_prefix = parts.prefix
     document.standard_main_no = parts.main_no
     document.standard_year = parts.year
@@ -800,7 +825,7 @@ def confirm_intake_decision(
 
     if action == "create_document":
         document = models.Document()
-        _apply_standard_fields(document, task)
+        _apply_standard_fields(document, task, candidate=candidate)
         db.add(document)
         db.flush()
         document_id = document.id
@@ -869,7 +894,7 @@ def confirm_intake_decision(
         if resource is not None:
             linked = link_archived_document_to_resources(db, document=document, source=source)
             calibrate_resource_status(db, resource)
-    elif task.normalized_standard_no or task.extracted_standard_no:
+    elif task.normalized_standard_no or task.extracted_standard_no or (candidate and candidate.standard_no):
         linked = link_archived_document_to_resources(db, document=document, source=source)
 
     task.final_action = action
