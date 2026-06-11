@@ -127,6 +127,51 @@ def _external_dedupe_key(item: TrustedSourceSearchResult) -> str | None:
     return None
 
 
+def search_trusted_sources_sliced(
+    db: Session,
+    queries: list[TrustedSourceSearchQuery],
+    *,
+    source_id: int | None = None,
+    include_external: bool = False,
+    limit: int = 20,
+    errors: list[dict[str, str | int]] | None = None,
+) -> list[TrustedSourceSearchResult]:
+    """Run multiple query slices and merge/deduplicate results."""
+    if not queries:
+        return []
+    limit = max(1, min(limit, 100))
+    per_slice_limit = max(3, min(limit, (limit // len(queries)) + 2))
+    merged: list[TrustedSourceSearchResult] = []
+    seen_local_ids: set[int] = set()
+    seen_external_keys: set[str] = set()
+
+    for query in queries:
+        batch = search_trusted_sources(
+            db,
+            query,
+            source_id=source_id,
+            include_external=include_external,
+            limit=per_slice_limit,
+            errors=errors,
+        )
+        for item in batch:
+            resource_id = item.raw.get("standard_resource_id")
+            if resource_id is not None:
+                if resource_id in seen_local_ids:
+                    continue
+                seen_local_ids.add(resource_id)
+            external_key = _external_dedupe_key(item)
+            if external_key is not None:
+                if external_key in seen_external_keys:
+                    continue
+                seen_external_keys.add(external_key)
+            merged.append(item)
+            if len(merged) >= limit:
+                return _sort_search_results(merged)[:limit]
+
+    return _sort_search_results(merged)[:limit]
+
+
 def search_trusted_sources(
     db: Session,
     query: TrustedSourceSearchQuery,

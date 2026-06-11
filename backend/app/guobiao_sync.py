@@ -6,7 +6,9 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from difflib import SequenceMatcher
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from sqlalchemy.orm import Session
@@ -14,7 +16,14 @@ from sqlalchemy.orm import Session
 from app import models
 from app.standard_number import normalize_standard_no
 from app.status_calibration import CHANGE_FIELD_LABELS, attach_change_logs_to_documents, calibrate_resource_status
-from app.trusted_source_adapters import TrustedSourceAdapter, TrustedSourceSyncOptions, TrustedSourceSyncStats, registry
+from app.trusted_source_adapters import (
+    TrustedSourceAdapter,
+    TrustedSourceSearchQuery,
+    TrustedSourceSearchResult,
+    TrustedSourceSyncOptions,
+    TrustedSourceSyncStats,
+    registry,
+)
 from app.trusted_source_search_service import LocalIndexSearchAdapterMixin
 
 BASE_URL = "https://ebook.chinabuilding.com.cn"
@@ -622,8 +631,184 @@ def sync_guobiao_resources(
     return stats
 
 
+def _guobiao_search_keyword(query: TrustedSourceSearchQuery) -> str | None:
+    parts = normalize_standard_no(query.normalized_standard_no or query.standard_no)
+    if parts.main_no:
+        return parts.main_no
+    if query.standard_no:
+        return query.standard_no.strip()[:80]
+    for keyword in query.keywords:
+        token = keyword.strip()
+        if token:
+            return token[:80]
+    if query.standard_name:
+        return query.standard_name.strip()[:80]
+    return None
+
+
+def _guobiao_item_to_search_result(
+    source: models.TrustedSource,
+    item: dict[str, str],
+    *,
+    query: TrustedSourceSearchQuery,
+    category_path: str,
+) -> TrustedSourceSearchResult:
+    standard_no = item.get("standard_no") or ""
+    standard_name = item.get("title") or standard_no or item.get("book_id") or ""
+    number_parts = normalize_standard_no(standard_no)
+    title_score = int(SequenceMatcher(None, query.standard_name or "", standard_name).ratio() * 100)
+    number_match = bool(
+        query.normalized_standard_no
+        and number_parts.normalized
+        and query.normalized_standard_no == number_parts.normalized
+    ) or bool(query.standard_no and standard_no and query.standard_no == standard_no)
+    for keyword in query.keywords:
+        token = keyword.strip().upper()
+        if token and (token in standard_no.upper() or token in standard_name.upper()):
+            number_match = True
+            break
+    if number_match and title_score >= 80:
+        score, reason = 95, "外网实时命中：编号与标题高度一致"
+    elif number_match:
+        score, reason = 90, "外网实时命中：标准编号一致"
+    elif title_score >= 80:
+        score, reason = 80, f"外网实时命中：标题相似度 {title_score}%"
+    else:
+        score, reason = max(55, title_score), f"外网实时命中：标题相似度 {title_score}%"
+    return TrustedSourceSearchResult(
+        source_id=source.id,
+        source_name=source.source_name or "国标电子书库",
+        standard_no=standard_no or None,
+        normalized_standard_no=number_parts.normalized,
+        standard_name=standard_name,
+        source_status=item.get("status"),
+        detail_url=item.get("detail_url"),
+        confidence_score=score,
+        match_reason=reason,
+        raw={
+            "search_backend": "external",
+            "adapter_key": "guobiao_ebook",
+            "external_item_id": item.get("book_id"),
+            "source_category_path": category_path,
+        },
+    )
+
+
+INLINE_ATLAS_PATTERN = re.compile(r"(\d{2}S\d{3})\s*《\s*([^》]{2,80})\s*》", re.I)
+
+
+def _guobiao_keyword_matches_item(keyword: str, item: dict[str, str]) -> bool:
+    token = keyword.strip().upper()
+    if not token:
+        return False
+    standard_no = (item.get("standard_no") or "").upper()
+    title = (item.get("title") or "").upper()
+    return token in standard_no or token in title
+
+
+def _guobiao_inline_atlas_items(html: str, keyword: str) -> list[dict[str, str]]:
+    token = keyword.strip().upper()
+    if not token:
+        return []
+    items: list[dict[str, str]] = []
+    seen_codes: set[str] = set()
+    for match in INLINE_ATLAS_PATTERN.finditer(html):
+        code = match.group(1).upper()
+        title = _strip_html(match.group(2) or "")
+        if not title or title in {"全部", "现行", "废止"}:
+            continue
+        if token not in {code, title.upper()} and token not in title.upper() and token not in code:
+            continue
+        if code in seen_codes:
+            continue
+        seen_codes.add(code)
+        items.append(
+            {
+                "book_id": "",
+                "standard_no": code,
+                "title": title,
+                "status": "现行",
+                "detail_url": f"{BASE_URL}/zbooklib/sublibBook/resultlist?SiteID=1&sublibID=2118&indexInfor={quote(code)}",
+            }
+        )
+    return items
+
+
+def search_guobiao_external(
+    db: Session,
+    source_id: int,
+    query: TrustedSourceSearchQuery,
+    *,
+    limit: int = 20,
+) -> list[TrustedSourceSearchResult]:
+    source = db.get(models.TrustedSource, source_id)
+    if source is None:
+        return []
+    keyword = _guobiao_search_keyword(query)
+    if not keyword:
+        return []
+
+    priority_sublibs = [2118, 2246, 2398, 2441]
+    results: list[TrustedSourceSearchResult] = []
+    seen_book_ids: set[str] = set()
+    seen_codes: set[str] = set()
+    with _client(timeout_seconds=30) as client:
+        if re.fullmatch(r"\d{2}S\d{3}", keyword.strip(), flags=re.I):
+            try:
+                catalog_response = client.get(
+                    f"{BASE_URL}/zbooklib/sublibBook/resultlist?SiteID=1&viewType=imgView&sublibID=2118&PageIndex=1"
+                )
+                catalog_response.raise_for_status()
+                sublib = next((item for item in SUBLIBS if item.sublib_id == 2118), None)
+                category_path = sublib.category_path if sublib else ""
+                for item in _guobiao_inline_atlas_items(catalog_response.text, keyword):
+                    code = (item.get("standard_no") or "").upper()
+                    if code in seen_codes:
+                        continue
+                    seen_codes.add(code)
+                    results.append(_guobiao_item_to_search_result(source, item, query=query, category_path=category_path))
+            except httpx.HTTPError:
+                pass
+
+        for sublib_id in priority_sublibs:
+            sublib = next((item for item in SUBLIBS if item.sublib_id == sublib_id), None)
+            category_path = sublib.category_path if sublib else ""
+            for page_index in range(1, 4):
+                list_url = (
+                    f"{BASE_URL}/zbooklib/sublibBook/resultlist?SiteID=1&viewType=imgView"
+                    f"&sublibID={sublib_id}&sortType=Default&abolish=&indexInfor={quote(keyword)}&PageIndex={page_index}"
+                )
+                try:
+                    response = client.get(list_url)
+                    response.raise_for_status()
+                    html = response.text
+                except httpx.HTTPError:
+                    continue
+                items = parse_list_items(html)
+                for item in items:
+                    if not _guobiao_keyword_matches_item(keyword, item):
+                        continue
+                    book_id = item.get("book_id")
+                    if book_id and book_id in seen_book_ids:
+                        continue
+                    if book_id:
+                        seen_book_ids.add(book_id)
+                    results.append(_guobiao_item_to_search_result(source, item, query=query, category_path=category_path))
+                    if len(results) >= limit:
+                        break
+                if len(results) >= limit:
+                    break
+            if len(results) >= limit:
+                break
+    results.sort(key=lambda item: item.confidence_score, reverse=True)
+    return results[:limit]
+
+
 class GuobiaoEbookAdapter(LocalIndexSearchAdapterMixin):
     adapter_key = "guobiao_ebook"
+
+    def search_external(self, db: Session, source_id: int, query: TrustedSourceSearchQuery) -> list[TrustedSourceSearchResult]:
+        return search_guobiao_external(db, source_id, query)
 
     def sync(self, db: Session, source_id: int, options: TrustedSourceSyncOptions) -> TrustedSourceSyncStats:
         source = db.get(models.TrustedSource, source_id)

@@ -28,8 +28,9 @@ from app.storage import (
     safe_upload_filename,
     sha256_file,
 )
+from app.intake_search_slices import build_intake_search_queries
 from app.trusted_source_adapters import TrustedSourceSearchQuery
-from app.trusted_source_search_service import search_trusted_sources
+from app.trusted_source_search_service import search_trusted_sources, search_trusted_sources_sliced
 
 settings = get_settings()
 
@@ -430,6 +431,79 @@ def _candidate_dedupe_key(candidate: models.LocalFileRecognitionCandidate) -> st
     return None
 
 
+def _intake_search_slices_for_task(task: models.LocalFileIntakeTask) -> list[TrustedSourceSearchQuery]:
+    return build_intake_search_queries(
+        original_file_name=task.original_file_name,
+        extracted_standard_no=task.extracted_standard_no,
+        normalized_standard_no=task.normalized_standard_no,
+        extracted_title=task.extracted_title,
+    )
+
+
+def _should_auto_external_search(
+    candidates: list[models.LocalFileRecognitionCandidate],
+    task: models.LocalFileIntakeTask,
+    *,
+    has_duplicate_version: bool,
+) -> bool:
+    if has_duplicate_version:
+        return False
+    if any(item.candidate_type == "document_version" and item.match_score >= 100 for item in candidates):
+        return False
+    if any(item.candidate_type == "standard_resource" and item.match_score >= 85 for item in candidates):
+        return False
+    if any(item.candidate_type == "document" and item.match_score >= 80 for item in candidates):
+        return False
+    return bool(_intake_search_slices_for_task(task))
+
+
+def _append_external_candidates(
+    db: Session,
+    task: models.LocalFileIntakeTask,
+    candidates: list[models.LocalFileRecognitionCandidate],
+) -> tuple[int, list[dict[str, str | int]], list[TrustedSourceSearchQuery], list[models.LocalFileRecognitionCandidate]]:
+    queries = _intake_search_slices_for_task(task)
+    if not queries:
+        return 0, [], [], []
+
+    errors: list[dict[str, str | int]] = []
+    results = search_trusted_sources_sliced(db, queries, include_external=True, limit=20, errors=errors)
+    external_results = [item for item in results if item.raw.get("search_backend") == "external"]
+
+    existing_keys = {
+        key
+        for candidate in candidates
+        if (key := _candidate_dedupe_key(candidate)) is not None
+    }
+    added_candidates: list[models.LocalFileRecognitionCandidate] = []
+    for item in external_results:
+        candidate = _candidate_from_search_result(task, item, search_backend="external")
+        key = _candidate_dedupe_key(candidate)
+        if key is not None and key in existing_keys:
+            continue
+        if key is not None:
+            existing_keys.add(key)
+        added_candidates.append(candidate)
+
+    for candidate in added_candidates:
+        db.add(candidate)
+
+    return len(added_candidates), errors, queries, added_candidates
+
+
+def _apply_decision_from_candidates(
+    db: Session,
+    task: models.LocalFileIntakeTask,
+    candidates: list[models.LocalFileRecognitionCandidate],
+) -> tuple[str, int, str, str]:
+    decision, confidence, risk, reason = calculate_decision(candidates, task)
+    task.decision = decision
+    task.confidence_score = confidence
+    task.risk_level = risk
+    task.decision_reason = reason
+    return decision, confidence, risk, reason
+
+
 def run_external_search_for_task(db: Session, task_id: int) -> tuple[models.LocalFileIntakeTask, int, list[dict[str, str | int]]]:
     task = db.get(models.LocalFileIntakeTask, task_id)
     if task is None:
@@ -437,45 +511,24 @@ def run_external_search_for_task(db: Session, task_id: int) -> tuple[models.Loca
     if task.final_action:
         raise ValueError("任务已处理，无法联网复核")
 
-    query = TrustedSourceSearchQuery(
-        standard_no=task.extracted_standard_no,
-        normalized_standard_no=task.normalized_standard_no,
-        standard_name=task.extracted_title,
+    queries = _intake_search_slices_for_task(task)
+    if not queries:
+        raise ValueError("无法从文件名或标题生成外网搜索切片")
+
+    existing_candidates = list(
+        db.scalars(
+            select(models.LocalFileRecognitionCandidate).where(models.LocalFileRecognitionCandidate.task_id == task.id)
+        )
     )
-    if not (query.standard_no or query.normalized_standard_no or query.standard_name):
-        raise ValueError("缺少标准编号或标题，无法发起外网搜索")
-
-    errors: list[dict[str, str | int]] = []
-    results = search_trusted_sources(db, query, include_external=True, limit=20, errors=errors)
-    external_results = [item for item in results if item.raw.get("search_backend") == "external"]
-
-    existing_keys = {
-        key
-        for candidate in task.candidates
-        if (key := _candidate_dedupe_key(candidate)) is not None
-    }
-    added = 0
-    for item in external_results:
-        candidate = _candidate_from_search_result(task, item, search_backend="external")
-        key = _candidate_dedupe_key(candidate)
-        if key is not None and key in existing_keys:
-            continue
-        db.add(candidate)
-        if key is not None:
-            existing_keys.add(key)
-        added += 1
-
+    added, errors, queries, _ = _append_external_candidates(db, task, existing_candidates)
     db.flush()
+
     all_candidates = list(
         db.scalars(
             select(models.LocalFileRecognitionCandidate).where(models.LocalFileRecognitionCandidate.task_id == task.id)
         )
     )
-    decision, confidence, risk, reason = calculate_decision(all_candidates, task)
-    task.decision = decision
-    task.confidence_score = confidence
-    task.risk_level = risk
-    task.decision_reason = reason
+    decision, confidence, risk, reason = _apply_decision_from_candidates(db, task, all_candidates)
 
     _append_log(
         db,
@@ -483,7 +536,7 @@ def run_external_search_for_task(db: Session, task_id: int) -> tuple[models.Loca
         "external_search",
         "ok" if not errors else "partial",
         f"外网复核追加 {added} 条候选",
-        {"added": added, "errors": errors},
+        {"added": added, "slice_count": len(queries), "errors": errors},
     )
     _append_log(
         db,
@@ -574,13 +627,45 @@ def analyze_local_file(db: Session, task_id: int) -> models.LocalFileIntakeTask:
         for candidate in candidates:
             db.add(candidate)
 
-        decision, confidence, risk, reason = calculate_decision(candidates, task)
-        task.decision = decision
-        task.confidence_score = confidence
-        task.risk_level = risk
-        task.decision_reason = reason
+        auto_external_added = 0
+        auto_external_errors: list[dict[str, str | int]] = []
+        auto_external_slices: list[TrustedSourceSearchQuery] = []
+        if _should_auto_external_search(candidates, task, has_duplicate_version=bool(version_candidates)):
+            auto_external_added, auto_external_errors, auto_external_slices, added_candidates = _append_external_candidates(
+                db, task, candidates
+            )
+            candidates.extend(added_candidates)
+            _append_log(
+                db,
+                task.id,
+                "auto_external_search",
+                "ok" if not auto_external_errors else "partial",
+                f"本地无高置信匹配，自动外网搜索追加 {auto_external_added} 条候选",
+                {
+                    "added": auto_external_added,
+                    "slice_count": len(auto_external_slices),
+                    "errors": auto_external_errors,
+                },
+            )
+
+        decision, confidence, risk, reason = _apply_decision_from_candidates(db, task, candidates)
         task.recognition_status = "completed"
         _append_log(db, task.id, "decision", "ok", reason, {"decision": decision, "confidence": confidence, "risk": risk})
+        if auto_external_added or auto_external_errors:
+            _append_log(
+                db,
+                task.id,
+                "external_search_decision",
+                "ok",
+                reason,
+                {
+                    "decision": decision,
+                    "confidence": confidence,
+                    "risk": risk,
+                    "added": auto_external_added,
+                    "auto": True,
+                },
+            )
         db.commit()
         db.refresh(task)
         return task

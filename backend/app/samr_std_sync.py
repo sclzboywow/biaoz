@@ -374,51 +374,78 @@ def _search_number_token(query: TrustedSourceSearchQuery) -> str | None:
     if parts.main_no:
         return parts.main_no
     raw = _text(query.standard_no or query.normalized_standard_no)
-    return raw
+    if raw:
+        return raw
+    for keyword in query.keywords:
+        token = keyword.strip()
+        if token and re.fullmatch(r"[A-Z0-9./-]{3,}", token, flags=re.I):
+            return token[:40]
+    return None
 
 
 def _search_name_token(query: TrustedSourceSearchQuery) -> str | None:
     if query.standard_name:
-        return query.standard_name.strip()[:80] or None
+        name = query.standard_name.strip()[:80]
+        if name and not re.fullmatch(r"[A-Z0-9./-]{3,}", name, flags=re.I):
+            return name
     for keyword in query.keywords:
         keyword = keyword.strip()
-        if keyword:
+        if not keyword:
+            continue
+        if re.search(r"[\u4e00-\u9fff]", keyword):
             return keyword[:80]
+        if len(keyword) >= 4 and not re.fullmatch(r"\d{2}[A-Z]\d{2,4}", keyword, flags=re.I):
+            return keyword[:80]
+    if query.standard_name:
+        return query.standard_name.strip()[:80] or None
     return None
 
 
 def fetch_search_page(client: httpx.Client, query: TrustedSourceSearchQuery, *, page_size: int = 20) -> dict[str, Any]:
-    params: dict[str, Any] = {
-        "tid": "2",
-        "pageNumber": 1,
-        "pageSize": max(1, min(page_size, 50)),
-    }
+    page_size = max(1, min(page_size, 50))
     number_token = _search_number_token(query)
     name_token = _search_name_token(query)
-    if number_token:
-        params["std_p4"] = number_token
-    elif name_token:
-        params["std_p8"] = name_token
-    else:
+    if not number_token and not name_token:
         return {"total": 0, "rows": []}
 
-    response = client.get(
-        f"{BASE_URL}/gb/search/gbAdvancedSearchPage",
-        params=params,
-        headers={"Referer": f"{BASE_URL}/gb/search/gbAdvancedSearch"},
-    )
-    response.raise_for_status()
-    payload = response.json()
-    rows = payload.get("rows") if isinstance(payload, dict) else []
-    if number_token and name_token and isinstance(rows, list) and not rows:
+    merged_rows: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+
+    def _append_rows(rows: list[Any]) -> None:
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            item_id = _text(row.get("id"))
+            if item_id and item_id in seen_ids:
+                continue
+            if item_id:
+                seen_ids.add(item_id)
+            merged_rows.append(row)
+
+    search_tokens: list[tuple[str, str]] = []
+    if number_token:
+        search_tokens.append(("std_p4", number_token))
+    if name_token:
+        search_tokens.append(("std_p8", name_token))
+
+    for field_name, token in search_tokens:
         response = client.get(
             f"{BASE_URL}/gb/search/gbAdvancedSearchPage",
-            params={"tid": "2", "pageNumber": 1, "pageSize": params["pageSize"], "std_p8": name_token},
+            params={
+                "tid": "2",
+                "pageNumber": 1,
+                "pageSize": page_size,
+                field_name: token,
+            },
             headers={"Referer": f"{BASE_URL}/gb/search/gbAdvancedSearch"},
         )
         response.raise_for_status()
         payload = response.json()
-    return payload if isinstance(payload, dict) else {"total": 0, "rows": []}
+        rows = payload.get("rows") if isinstance(payload, dict) else []
+        if isinstance(rows, list):
+            _append_rows(rows)
+
+    return {"total": len(merged_rows), "rows": merged_rows}
 
 
 def _score_external_row(row: dict[str, Any], *, query: TrustedSourceSearchQuery) -> tuple[int, str]:
@@ -431,6 +458,11 @@ def _score_external_row(row: dict[str, Any], *, query: TrustedSourceSearchQuery)
         and number_parts.normalized
         and query.normalized_standard_no == number_parts.normalized
     ) or bool(query.standard_no and standard_no and query.standard_no == standard_no)
+    for keyword in query.keywords:
+        token = keyword.strip().upper()
+        if token and standard_no and token in standard_no.upper():
+            number_match = True
+            break
     if number_match and title_score >= 80:
         return 95, "外网实时命中：编号与标题高度一致"
     if number_match:

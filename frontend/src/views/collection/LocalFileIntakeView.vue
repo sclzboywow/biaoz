@@ -57,6 +57,19 @@ const searchBackendLabels: Record<string, string> = {
   external: '外网实时',
 }
 
+const stepLabels: Record<string, string> = {
+  upload: '上传',
+  extract_metadata: '提取元数据',
+  match_versions: '版本匹配',
+  match_documents: '文件匹配',
+  match_resources: '可信源匹配',
+  auto_external_search: '自动外网搜索',
+  external_search: '外网复核',
+  external_search_decision: '联网决策',
+  decision: '系统决策',
+  analyze: '识别',
+}
+
 function formatSize(size: number) {
   if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`
   if (size >= 1024) return `${(size / 1024).toFixed(1)} KB`
@@ -148,6 +161,10 @@ async function openDetail(taskId: number) {
 function searchBackendLabel(value?: string | null) {
   if (!value) return '本地索引'
   return searchBackendLabels[value] || value
+}
+
+function stepLabel(value?: string | null) {
+  return value ? stepLabels[value] || value : '-'
 }
 
 async function runExternalSearch() {
@@ -356,12 +373,11 @@ onMounted(loadItems)
               type="primary"
               plain
               :loading="externalSearching"
-              :disabled="!(activeTask.extracted_standard_no || activeTask.extracted_title)"
               @click="runExternalSearch"
             >
-              联网复核
+              重新联网复核
             </el-button>
-            <span style="color: #909399; font-size: 13px">调用全国标准信息公共服务平台实时搜索，结果追加到候选列表</span>
+            <span style="color: #909399; font-size: 13px">识别时本地无高置信匹配会自动联网；此按钮可重新切片搜索全部已启用可信源</span>
           </div>
           <el-table
             :data="detail?.candidates || []"
@@ -388,7 +404,7 @@ onMounted(loadItems)
           <h3 style="margin: 16px 0 8px">识别日志</h3>
           <el-timeline>
             <el-timeline-item v-for="log in detail?.logs || []" :key="log.id" :timestamp="formatDateTime(log.created_at)">
-              {{ log.step_name }} · {{ log.result }} · {{ log.message }}
+              {{ stepLabel(log.step_name) }} · {{ log.result }} · {{ log.message }}
             </el-timeline-item>
           </el-timeline>
 
