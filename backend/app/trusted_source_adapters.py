@@ -66,10 +66,41 @@ class TrustedSourceSyncStats:
     linked_change_logs: int = 0
 
 
+@dataclass
+class TrustedSourceSearchQuery:
+    standard_no: str | None = None
+    normalized_standard_no: str | None = None
+    standard_name: str | None = None
+    keywords: list[str] = field(default_factory=list)
+    publish_date: date | None = None
+    effective_date: date | None = None
+
+
+@dataclass
+class TrustedSourceSearchResult:
+    source_id: int
+    source_name: str
+    standard_no: str | None
+    normalized_standard_no: str | None
+    standard_name: str
+    source_status: str | None = None
+    publish_date: date | None = None
+    effective_date: date | None = None
+    abolish_date: date | None = None
+    detail_url: str | None = None
+    pdf_trial_url: str | None = None
+    confidence_score: int = 0
+    match_reason: str | None = None
+    raw: dict = field(default_factory=dict)
+
+
 class TrustedSourceAdapter(Protocol):
     adapter_key: str
 
     def sync(self, db: Session, source_id: int, options: TrustedSourceSyncOptions) -> TrustedSourceSyncStats:
+        ...
+
+    def search(self, db: Session, source_id: int, query: TrustedSourceSearchQuery) -> list[TrustedSourceSearchResult]:
         ...
 
 

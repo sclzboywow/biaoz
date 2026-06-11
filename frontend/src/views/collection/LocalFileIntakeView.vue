@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { Refresh, Search, UploadFilled } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox, type UploadRequestOptions } from 'element-plus'
 import {
   api,
   type LocalFileIntakeConfirmPayload,
@@ -182,9 +182,8 @@ async function deleteTask(task: LocalFileIntakeTask) {
   }
 }
 
-function beforeUpload(file: File) {
-  void uploadFile(file)
-  return false
+function handleUploadRequest(options: UploadRequestOptions) {
+  void uploadFile(options.file as File)
 }
 
 onMounted(loadItems)
@@ -207,18 +206,22 @@ onMounted(loadItems)
       style="margin-bottom: 12px"
     />
 
-    <el-upload
-      drag
-      :auto-upload="true"
-      :show-file-list="false"
-      :disabled="uploading"
-      accept=".pdf,.doc,.docx,.xls,.xlsx,.zip,.rar,.7z"
-      :before-upload="beforeUpload"
-    >
-      <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
-      <div class="el-upload__text">拖拽文件到此处，或 <em>点击上传</em></div>
-      <template #tip><div class="el-upload__tip">文件先进入临时区，不会直接写入文件归档库</div></template>
-    </el-upload>
+    <div v-loading="uploading" class="upload-panel">
+      <el-upload
+        drag
+        class="upload-dropzone"
+        :auto-upload="true"
+        :show-file-list="false"
+        :disabled="uploading"
+        :multiple="false"
+        accept=".pdf,.doc,.docx,.xls,.xlsx,.zip,.rar,.7z"
+        :http-request="handleUploadRequest"
+      >
+        <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
+        <div class="el-upload__text">拖拽文件到此处，或 <em>点击上传</em></div>
+        <template #tip><div class="el-upload__tip">文件先进入临时区，不会直接写入文件归档库</div></template>
+      </el-upload>
+    </div>
 
     <el-form :inline="true" class="filters" style="margin-top: 16px">
       <el-form-item label="查询">
@@ -371,5 +374,50 @@ onMounted(loadItems)
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.upload-panel {
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+.upload-panel :deep(.el-upload) {
+  width: 100%;
+}
+
+.upload-panel :deep(.el-upload-dragger) {
+  width: 100%;
+  min-height: 180px;
+  padding: 36px 20px;
+  border: 1px dashed #c0c4cc;
+  border-radius: 8px;
+  background: #fafafa;
+  transition: border-color 0.2s, background-color 0.2s;
+}
+
+.upload-panel :deep(.el-upload-dragger:hover) {
+  border-color: #409eff;
+  background: #f5faff;
+}
+
+.upload-panel :deep(.el-icon--upload) {
+  font-size: 48px;
+  color: #909399;
+  margin-bottom: 12px;
+}
+
+.upload-panel :deep(.el-upload__text) {
+  color: #606266;
+  font-size: 14px;
+}
+
+.upload-panel :deep(.el-upload__text em) {
+  color: #409eff;
+  font-style: normal;
+}
+
+.upload-panel :deep(.el-upload__tip) {
+  margin-top: 8px;
+  color: #909399;
 }
 </style>

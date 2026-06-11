@@ -626,6 +626,41 @@ class TrustedSourceSyncRequest(BaseModel):
     category_limit: int | None = None
 
 
+class TrustedSourceSearchRequest(BaseModel):
+    standard_no: str | None = None
+    normalized_standard_no: str | None = None
+    standard_name: str | None = None
+    keywords: list[str] = Field(default_factory=list)
+    publish_date: date | None = None
+    effective_date: date | None = None
+    source_id: int | None = None
+    include_external: bool = False
+    limit: int = Field(default=20, ge=1, le=100)
+
+
+class TrustedSourceSearchResultOut(BaseModel):
+    source_id: int
+    source_name: str
+    standard_resource_id: int | None = None
+    standard_no: str | None = None
+    normalized_standard_no: str | None = None
+    standard_name: str
+    source_status: str | None = None
+    publish_date: date | None = None
+    effective_date: date | None = None
+    abolish_date: date | None = None
+    detail_url: str | None = None
+    pdf_trial_url: str | None = None
+    confidence_score: int = 0
+    match_reason: str | None = None
+    search_backend: str | None = None
+
+
+class TrustedSourceSearchResponse(BaseModel):
+    total: int
+    items: list[TrustedSourceSearchResultOut]
+
+
 class GuobiaoSyncResult(BaseModel):
     pages: int
     items: int

@@ -32,6 +32,9 @@ import {
   ElTabPane,
   ElTabs,
   ElTag,
+  ElTimeline,
+  ElTimelineItem,
+  ElUpload,
 } from 'element-plus'
 import 'element-plus/dist/index.css'
 import './style.css'
@@ -72,6 +75,9 @@ const app = createApp(App)
   ElTabPane,
   ElTabs,
   ElTag,
+  ElTimeline,
+  ElTimelineItem,
+  ElUpload,
 ].forEach(component => {
   app.use(component)
 })

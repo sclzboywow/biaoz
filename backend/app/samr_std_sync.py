@@ -14,6 +14,7 @@ from app import models
 from app.standard_number import normalize_standard_no
 from app.status_calibration import CHANGE_FIELD_LABELS, attach_change_logs_to_documents, calibrate_resource_status
 from app.trusted_source_adapters import TrustedSourceAdapter, TrustedSourceSyncOptions, TrustedSourceSyncStats, registry
+from app.trusted_source_search_service import LocalIndexSearchAdapterMixin
 
 
 BASE_URL = "https://std.samr.gov.cn"
@@ -637,7 +638,7 @@ def sync_samr_std_resources(
     return stats
 
 
-class SamrStdPublicAdapter(TrustedSourceAdapter):
+class SamrStdPublicAdapter(LocalIndexSearchAdapterMixin):
     adapter_key = "samr_std_public"
 
     def sync(self, db: Session, source_id: int, options: TrustedSourceSyncOptions) -> TrustedSourceSyncStats:

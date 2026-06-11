@@ -15,6 +15,7 @@ from app import models
 from app.standard_number import normalize_standard_no
 from app.status_calibration import CHANGE_FIELD_LABELS, attach_change_logs_to_documents, calibrate_resource_status
 from app.trusted_source_adapters import TrustedSourceAdapter, TrustedSourceSyncOptions, TrustedSourceSyncStats, registry
+from app.trusted_source_search_service import LocalIndexSearchAdapterMixin
 
 BASE_URL = "https://ebook.chinabuilding.com.cn"
 
@@ -621,7 +622,7 @@ def sync_guobiao_resources(
     return stats
 
 
-class GuobiaoEbookAdapter(TrustedSourceAdapter):
+class GuobiaoEbookAdapter(LocalIndexSearchAdapterMixin):
     adapter_key = "guobiao_ebook"
 
     def sync(self, db: Session, source_id: int, options: TrustedSourceSyncOptions) -> TrustedSourceSyncStats:

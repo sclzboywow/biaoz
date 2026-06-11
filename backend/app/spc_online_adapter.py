@@ -18,6 +18,7 @@ from app import models
 from app.samr_public_adapters import _detail_hash, _limit, _parse_date, _system_status, _upsert_resource
 from app.status_calibration import attach_change_logs_to_documents, calibrate_resource_status
 from app.trusted_source_adapters import TrustedSourceAdapter, TrustedSourceSyncOptions, TrustedSourceSyncStats, registry
+from app.trusted_source_search_service import LocalIndexSearchAdapterMixin
 
 
 SPC_BASE_URL = "https://www.spc.org.cn"
@@ -263,7 +264,7 @@ def _parse_detail(html: str, detail_url: str, category: SpcCategory) -> dict[str
     }
 
 
-class SpcOnlineAdapter(TrustedSourceAdapter):
+class SpcOnlineAdapter(LocalIndexSearchAdapterMixin):
     adapter_key = "spc_standard_online"
 
     def _client(self) -> httpx.Client:

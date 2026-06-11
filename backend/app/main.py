@@ -78,7 +78,8 @@ from app.settings_store import (
 )
 from app.standard_number import normalize_standard_no
 from app.status_calibration import calibrate_resource_status
-from app.trusted_source_adapters import TrustedSourceSyncOptions, registry
+from app.trusted_source_adapters import TrustedSourceSearchQuery, TrustedSourceSyncOptions, registry
+from app.trusted_source_search_service import search_trusted_sources
 from app.storage import check_storage_root, configured_storage_root, iter_storage_roots, relative_storage_path, save_upload
 from app.url_checker import check_url_source
 
@@ -977,6 +978,50 @@ def list_trusted_sources(include_disabled: bool = False, db: Session = Depends(g
     if not include_disabled:
         statement = statement.where(models.TrustedSource.enabled.is_(True))
     return list(db.scalars(statement))
+
+
+def _trusted_source_search_result_out(item) -> schemas.TrustedSourceSearchResultOut:
+    return schemas.TrustedSourceSearchResultOut(
+        source_id=item.source_id,
+        source_name=item.source_name,
+        standard_resource_id=item.raw.get("standard_resource_id"),
+        standard_no=item.standard_no,
+        normalized_standard_no=item.normalized_standard_no,
+        standard_name=item.standard_name,
+        source_status=item.source_status,
+        publish_date=item.publish_date,
+        effective_date=item.effective_date,
+        abolish_date=item.abolish_date,
+        detail_url=item.detail_url,
+        pdf_trial_url=item.pdf_trial_url,
+        confidence_score=item.confidence_score,
+        match_reason=item.match_reason,
+        search_backend=item.raw.get("search_backend"),
+    )
+
+
+@api.post("/trusted-sources/search", response_model=schemas.TrustedSourceSearchResponse)
+def search_trusted_sources_api(payload: schemas.TrustedSourceSearchRequest, db: Session = Depends(get_db)):
+    ensure_default_trusted_sources(db)
+    query = TrustedSourceSearchQuery(
+        standard_no=payload.standard_no,
+        normalized_standard_no=payload.normalized_standard_no,
+        standard_name=payload.standard_name,
+        keywords=payload.keywords,
+        publish_date=payload.publish_date,
+        effective_date=payload.effective_date,
+    )
+    items = search_trusted_sources(
+        db,
+        query,
+        source_id=payload.source_id,
+        include_external=payload.include_external,
+        limit=payload.limit,
+    )
+    return schemas.TrustedSourceSearchResponse(
+        total=len(items),
+        items=[_trusted_source_search_result_out(item) for item in items],
+    )
 
 
 @api.get("/dashboard/governance-summary", response_model=schemas.GovernanceDashboardSummaryOut)

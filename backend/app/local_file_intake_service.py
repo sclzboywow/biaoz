@@ -20,6 +20,8 @@ from app.settings_store import get_bool_setting
 from app.standard_number import normalize_standard_no
 from app.status_calibration import calibrate_resource_status, link_archived_document_to_resources
 from app.storage import check_storage_root, relative_storage_path, sha256_file
+from app.trusted_source_adapters import TrustedSourceSearchQuery
+from app.trusted_source_search_service import search_trusted_sources
 
 settings = get_settings()
 
@@ -232,48 +234,39 @@ def match_existing_documents(db: Session, task: models.LocalFileIntakeTask) -> l
 
 
 def match_standard_resources(db: Session, task: models.LocalFileIntakeTask) -> list[models.LocalFileRecognitionCandidate]:
-    filters = []
-    if task.normalized_standard_no:
-        filters.append(models.StandardResource.normalized_standard_no == task.normalized_standard_no)
-    if task.extracted_standard_no:
-        filters.append(models.StandardResource.standard_no == task.extracted_standard_no)
-    if not filters and task.extracted_title:
-        filters.append(models.StandardResource.standard_name.ilike(f"%{task.extracted_title[:40]}%"))
-    if not filters:
+    query = TrustedSourceSearchQuery(
+        standard_no=task.extracted_standard_no,
+        normalized_standard_no=task.normalized_standard_no,
+        standard_name=task.extracted_title,
+    )
+    if not (query.standard_no or query.normalized_standard_no or query.standard_name):
         return []
 
+    results = search_trusted_sources(db, query, include_external=False, limit=20)
     candidates: list[models.LocalFileRecognitionCandidate] = []
-    for resource in db.scalars(
-        select(models.StandardResource)
-        .where(or_(*filters))
-        .order_by(desc(models.StandardResource.updated_at), desc(models.StandardResource.id))
-        .limit(20)
-    ):
-        title_score = _similarity(task.extracted_title, resource.standard_name)
-        number_match = (
-            (task.normalized_standard_no and task.normalized_standard_no == (resource.normalized_standard_no or normalize_standard_no(resource.standard_no).normalized))
-            or (task.extracted_standard_no and task.extracted_standard_no == resource.standard_no)
-        )
-        score = 95 if number_match and title_score >= 80 else 85 if number_match else max(50, title_score)
+    for item in results:
+        resource_id = item.raw.get("standard_resource_id")
+        title_score = item.raw.get("title_similarity") or _similarity(task.extracted_title, item.standard_name)
+        score = item.confidence_score
         advice = "create_document" if score >= 85 else "manual_review" if score >= 70 else "need_review"
         candidates.append(
             models.LocalFileRecognitionCandidate(
                 task_id=task.id,
                 candidate_type="standard_resource",
-                candidate_id=resource.id,
-                source_id=resource.source_id,
-                source_name=resource.source_name,
-                standard_no=resource.standard_no,
-                normalized_standard_no=resource.normalized_standard_no,
-                standard_name=resource.standard_name,
-                source_status=resource.source_status,
-                publish_date=resource.publish_date,
-                effective_date=resource.effective_date,
-                abolish_date=resource.abolish_date,
-                detail_url=resource.detail_url,
-                pdf_trial_url=resource.pdf_trial_url,
+                candidate_id=int(resource_id) if resource_id is not None else None,
+                source_id=item.source_id,
+                source_name=item.source_name,
+                standard_no=item.standard_no,
+                normalized_standard_no=item.normalized_standard_no,
+                standard_name=item.standard_name,
+                source_status=item.source_status,
+                publish_date=item.publish_date,
+                effective_date=item.effective_date,
+                abolish_date=item.abolish_date,
+                detail_url=item.detail_url,
+                pdf_trial_url=item.pdf_trial_url,
                 match_score=score,
-                match_reason=f"可信源索引命中，标题相似度 {title_score}%",
+                match_reason=item.match_reason or f"可信源索引命中，标题相似度 {title_score}%",
                 decision_advice=advice,
             )
         )
@@ -639,7 +632,8 @@ def list_intake_tasks_page(
     if cursor:
         statement = statement.where(models.LocalFileIntakeTask.id < cursor)
 
-    total = db.scalar(select(func.count()).select_from(models.LocalFileIntakeTask)) or 0
+    count_statement = select(func.count()).select_from(statement.subquery())
+    total = db.scalar(count_statement) or 0
     page_size = min(max(page_size, 1), 200)
     items = list(db.scalars(statement.order_by(desc(models.LocalFileIntakeTask.id)).limit(page_size + 1)))
     has_more = len(items) > page_size

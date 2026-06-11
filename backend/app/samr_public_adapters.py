@@ -16,6 +16,7 @@ from app import models
 from app.standard_number import normalize_standard_no
 from app.status_calibration import attach_change_logs_to_documents, calibrate_resource_status
 from app.trusted_source_adapters import TrustedSourceAdapter, TrustedSourceSyncOptions, TrustedSourceSyncStats, registry
+from app.trusted_source_search_service import LocalIndexSearchAdapterMixin
 
 
 HBDB_PAGE_SIZE = int(os.getenv("HBDB_PAGE_SIZE", "100"))
@@ -244,7 +245,7 @@ def _upsert_resource(
     return resource, created
 
 
-class HbDbAdapter(TrustedSourceAdapter):
+class HbDbAdapter(LocalIndexSearchAdapterMixin):
     def __init__(self, adapter_key: str, base_url: str, config: CategoryConfig) -> None:
         self.adapter_key = adapter_key
         self.base_url = base_url.rstrip("/")
@@ -384,7 +385,7 @@ class HbDbAdapter(TrustedSourceAdapter):
         return stats
 
 
-class TtbzAdapter(TrustedSourceAdapter):
+class TtbzAdapter(LocalIndexSearchAdapterMixin):
     adapter_key = "samr_group_standard_public"
 
     config = CategoryConfig(
@@ -684,7 +685,7 @@ def _parse_qybz_detail(html: str) -> dict[str, Any]:
     }
 
 
-class QybzAdapter(TrustedSourceAdapter):
+class QybzAdapter(LocalIndexSearchAdapterMixin):
     adapter_key = "samr_enterprise_standard_public"
 
     config = CategoryConfig(
