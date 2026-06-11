@@ -646,6 +646,7 @@ class LocalFileRecognitionCandidate(Base):
     match_score: Mapped[int] = mapped_column(Integer, default=0)
     match_reason: Mapped[str | None] = mapped_column(Text)
     decision_advice: Mapped[str | None] = mapped_column(String(40))
+    search_backend: Mapped[str | None] = mapped_column(String(40))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     task: Mapped["LocalFileIntakeTask"] = relationship(back_populates="candidates")

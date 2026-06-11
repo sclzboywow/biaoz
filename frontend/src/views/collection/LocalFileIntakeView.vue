@@ -6,6 +6,7 @@ import {
   api,
   type LocalFileIntakeConfirmPayload,
   type LocalFileIntakeDetail,
+  type LocalFileIntakeExternalSearchResponse,
   type LocalFileIntakePage,
   type LocalFileIntakeTask,
   type LocalFileRecognitionCandidate,
@@ -25,6 +26,7 @@ const query = reactive({ q: '', recognition_status: '', decision: '' })
 
 const detailVisible = ref(false)
 const detailLoading = ref(false)
+const externalSearching = ref(false)
 const detail = ref<LocalFileIntakeDetail | null>(null)
 const selectedCandidateId = ref<number | null>(null)
 const confirmRemark = ref('')
@@ -48,6 +50,24 @@ const candidateTypeLabels: Record<string, string> = {
   document_version: '已有版本',
   document: '已有标准',
   standard_resource: '可信源',
+}
+
+const searchBackendLabels: Record<string, string> = {
+  local_index: '本地索引',
+  external: '外网实时',
+}
+
+const stepLabels: Record<string, string> = {
+  upload: '上传',
+  extract_metadata: '提取元数据',
+  match_versions: '版本匹配',
+  match_documents: '文件匹配',
+  match_resources: '可信源匹配',
+  auto_external_search: '自动外网搜索',
+  external_search: '外网复核',
+  external_search_decision: '联网决策',
+  decision: '系统决策',
+  analyze: '识别',
 }
 
 function formatSize(size: number) {
@@ -135,6 +155,40 @@ async function openDetail(taskId: number) {
     selectedCandidateId.value = res.data.candidates[0]?.id ?? null
   } finally {
     detailLoading.value = false
+  }
+}
+
+function searchBackendLabel(value?: string | null) {
+  if (!value) return '本地索引'
+  return searchBackendLabels[value] || value
+}
+
+function stepLabel(value?: string | null) {
+  return value ? stepLabels[value] || value : '-'
+}
+
+async function runExternalSearch() {
+  if (!activeTask.value) return
+  externalSearching.value = true
+  try {
+    const res = await api.post<LocalFileIntakeExternalSearchResponse>(
+      `/local-file-intake/${activeTask.value.id}/external-search`,
+      null,
+      { timeout: 120_000 },
+    )
+    detail.value = res.data
+    if (res.data.added > 0) {
+      ElMessage.success(`外网复核完成，新增 ${res.data.added} 条候选`)
+    } else {
+      ElMessage.info('外网复核完成，未发现新的候选')
+    }
+    if (res.data.errors.length > 0) {
+      ElMessage.warning(`部分可信源访问失败：${res.data.errors.map(item => item.source_name).join('、')}`)
+    }
+  } catch (error: any) {
+    ElMessage.error(error.userMessage || '联网复核失败')
+  } finally {
+    externalSearching.value = false
   }
 }
 
@@ -314,6 +368,17 @@ onMounted(loadItems)
           </el-descriptions>
 
           <h3 style="margin: 16px 0 8px">候选匹配</h3>
+          <div v-if="!activeTask.final_action" class="row-actions" style="margin-bottom: 8px">
+            <el-button
+              type="primary"
+              plain
+              :loading="externalSearching"
+              @click="runExternalSearch"
+            >
+              重新联网复核
+            </el-button>
+            <span style="color: #909399; font-size: 13px">识别时本地无高置信匹配会自动联网；此按钮可重新切片搜索全部已启用可信源</span>
+          </div>
           <el-table
             :data="detail?.candidates || []"
             highlight-current-row
@@ -321,6 +386,9 @@ onMounted(loadItems)
           >
             <el-table-column label="候选类型" width="110">
               <template #default="{ row }">{{ candidateTypeLabels[row.candidate_type] || row.candidate_type }}</template>
+            </el-table-column>
+            <el-table-column label="数据来源" width="100">
+              <template #default="{ row }">{{ searchBackendLabel(row.search_backend) }}</template>
             </el-table-column>
             <el-table-column prop="source_name" label="来源名称" width="140" show-overflow-tooltip />
             <el-table-column prop="standard_no" label="标准编号" width="140" show-overflow-tooltip />
@@ -336,7 +404,7 @@ onMounted(loadItems)
           <h3 style="margin: 16px 0 8px">识别日志</h3>
           <el-timeline>
             <el-timeline-item v-for="log in detail?.logs || []" :key="log.id" :timestamp="formatDateTime(log.created_at)">
-              {{ log.step_name }} · {{ log.result }} · {{ log.message }}
+              {{ stepLabel(log.step_name) }} · {{ log.result }} · {{ log.message }}
             </el-timeline-item>
           </el-timeline>
 

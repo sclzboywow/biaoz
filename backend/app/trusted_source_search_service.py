@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import re
 from difflib import SequenceMatcher
 
 from sqlalchemy import desc, or_, select
@@ -8,6 +10,8 @@ from sqlalchemy.orm import Session
 from app import models
 from app.standard_number import normalize_standard_no
 from app.trusted_source_adapters import TrustedSourceSearchQuery, TrustedSourceSearchResult
+
+logger = logging.getLogger(__name__)
 
 
 def _similarity(left: str | None, right: str | None) -> int:
@@ -76,7 +80,12 @@ def search_standard_resources_index(
     if not filters and query.keywords:
         for keyword in query.keywords[:5]:
             keyword = keyword.strip()
-            if keyword:
+            if not keyword:
+                continue
+            if re.fullmatch(r"[A-Z0-9./-]{3,}", keyword, flags=re.I):
+                filters.append(models.StandardResource.standard_no.ilike(keyword))
+                filters.append(models.StandardResource.normalized_standard_no.ilike(keyword))
+            else:
                 filters.append(models.StandardResource.standard_name.ilike(f"%{keyword[:40]}%"))
     if not filters:
         return []
@@ -112,6 +121,63 @@ def adapter_search_via_local_index(
     return results
 
 
+def _external_dedupe_key(item: TrustedSourceSearchResult) -> str | None:
+    external_item_id = item.raw.get("external_item_id")
+    if external_item_id:
+        return f"{item.source_id}:{external_item_id}"
+    if item.detail_url:
+        return f"{item.source_id}:{item.detail_url}"
+    normalized = item.normalized_standard_no or item.standard_no
+    if normalized:
+        return f"{item.source_id}:{normalized}:{item.standard_name}"
+    return None
+
+
+def search_trusted_sources_sliced(
+    db: Session,
+    queries: list[TrustedSourceSearchQuery],
+    *,
+    source_id: int | None = None,
+    include_external: bool = False,
+    limit: int = 20,
+    errors: list[dict[str, str | int]] | None = None,
+) -> list[TrustedSourceSearchResult]:
+    """Run multiple query slices and merge/deduplicate results."""
+    if not queries:
+        return []
+    limit = max(1, min(limit, 100))
+    per_slice_limit = max(3, min(limit, (limit // len(queries)) + 2))
+    merged: list[TrustedSourceSearchResult] = []
+    seen_local_ids: set[int] = set()
+    seen_external_keys: set[str] = set()
+
+    for query in queries:
+        batch = search_trusted_sources(
+            db,
+            query,
+            source_id=source_id,
+            include_external=include_external,
+            limit=per_slice_limit,
+            errors=errors,
+        )
+        for item in batch:
+            resource_id = item.raw.get("standard_resource_id")
+            if resource_id is not None:
+                if resource_id in seen_local_ids:
+                    continue
+                seen_local_ids.add(resource_id)
+            external_key = _external_dedupe_key(item)
+            if external_key is not None:
+                if external_key in seen_external_keys:
+                    continue
+                seen_external_keys.add(external_key)
+            merged.append(item)
+            if len(merged) >= limit:
+                return _sort_search_results(merged)[:limit]
+
+    return _sort_search_results(merged)[:limit]
+
+
 def search_trusted_sources(
     db: Session,
     query: TrustedSourceSearchQuery,
@@ -119,6 +185,7 @@ def search_trusted_sources(
     source_id: int | None = None,
     include_external: bool = False,
     limit: int = 20,
+    errors: list[dict[str, str | int]] | None = None,
 ) -> list[TrustedSourceSearchResult]:
     """Unified trusted-source search entry used by intake, review, and API."""
     limit = max(1, min(limit, 100))
@@ -128,13 +195,21 @@ def search_trusted_sources(
 
     from app.trusted_source_adapters import registry
 
-    seen_ids = {
+    seen_local_ids = {
         item.raw.get("standard_resource_id")
         for item in results
         if item.raw.get("standard_resource_id") is not None
     }
+    seen_external_keys = {
+        key
+        for item in results
+        if (key := _external_dedupe_key(item)) is not None
+    }
 
-    source_query = select(models.TrustedSource).where(models.TrustedSource.enabled.is_(True))
+    source_query = select(models.TrustedSource).where(
+        models.TrustedSource.enabled.is_(True),
+        models.TrustedSource.adapter_key.is_not(None),
+    )
     if source_id is not None:
         source_query = source_query.where(models.TrustedSource.id == source_id)
     sources = list(db.scalars(source_query.order_by(models.TrustedSource.id)))
@@ -145,22 +220,52 @@ def search_trusted_sources(
         adapter = registry.get(source.adapter_key)
         if adapter is None:
             continue
+        search_external = getattr(adapter, "search_external", None)
+        if search_external is None:
+            continue
         try:
-            adapter_results = adapter.search(db, source.id, query)
+            adapter_results = search_external(db, source.id, query)
         except NotImplementedError:
             continue
+        except Exception as exc:
+            logger.exception(
+                "external trusted-source search failed source_id=%s adapter=%s",
+                source.id,
+                source.adapter_key,
+            )
+            if errors is not None:
+                errors.append(
+                    {
+                        "source_id": source.id,
+                        "source_name": source.source_name or "",
+                        "adapter_key": source.adapter_key or "",
+                        "message": str(exc),
+                    }
+                )
+            continue
+
         for item in adapter_results:
+            item.raw.setdefault("search_backend", "external")
+            item.raw.setdefault("adapter_key", source.adapter_key)
             resource_id = item.raw.get("standard_resource_id")
-            if resource_id is not None and resource_id in seen_ids:
+            if resource_id is not None and resource_id in seen_local_ids:
+                continue
+            external_key = _external_dedupe_key(item)
+            if external_key is not None and external_key in seen_external_keys:
                 continue
             if resource_id is not None:
-                seen_ids.add(resource_id)
+                seen_local_ids.add(resource_id)
+            if external_key is not None:
+                seen_external_keys.add(external_key)
             results.append(item)
             if len(results) >= limit:
-                return results[:limit]
+                return _sort_search_results(results)[:limit]
 
-    results.sort(key=lambda item: item.confidence_score, reverse=True)
-    return results[:limit]
+    return _sort_search_results(results)[:limit]
+
+
+def _sort_search_results(results: list[TrustedSourceSearchResult]) -> list[TrustedSourceSearchResult]:
+    return sorted(results, key=lambda item: item.confidence_score, reverse=True)
 
 
 class LocalIndexSearchAdapterMixin:
@@ -168,3 +273,6 @@ class LocalIndexSearchAdapterMixin:
 
     def search(self, db: Session, source_id: int, query: TrustedSourceSearchQuery) -> list[TrustedSourceSearchResult]:
         return adapter_search_via_local_index(db, source_id, query, limit=20)
+
+    def search_external(self, db: Session, source_id: int, query: TrustedSourceSearchQuery) -> list[TrustedSourceSearchResult]:
+        raise NotImplementedError

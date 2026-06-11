@@ -208,6 +208,7 @@ export type LocalFileRecognitionCandidate = {
   match_score: number
   match_reason?: string | null
   decision_advice?: string | null
+  search_backend?: string | null
   created_at: string
 }
 
@@ -225,6 +226,18 @@ export type LocalFileIntakeDetail = {
   task: LocalFileIntakeTask
   candidates: LocalFileRecognitionCandidate[]
   logs: LocalFileIntakeLog[]
+}
+
+export type LocalFileIntakeExternalSearchResponse = LocalFileIntakeDetail & {
+  added: number
+  errors: TrustedSourceSearchError[]
+}
+
+export type TrustedSourceSearchError = {
+  source_id: number
+  source_name: string
+  adapter_key?: string | null
+  message: string
 }
 
 export type LocalFileIntakePage = {

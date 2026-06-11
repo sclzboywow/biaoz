@@ -3,9 +3,11 @@
 import hashlib
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from difflib import SequenceMatcher
 from typing import Any
 
 import httpx
@@ -15,7 +17,14 @@ from sqlalchemy.orm import Session
 from app import models
 from app.standard_number import normalize_standard_no
 from app.status_calibration import attach_change_logs_to_documents, calibrate_resource_status
-from app.trusted_source_adapters import TrustedSourceAdapter, TrustedSourceSyncOptions, TrustedSourceSyncStats, registry
+from app.trusted_source_adapters import (
+    TrustedSourceAdapter,
+    TrustedSourceSearchQuery,
+    TrustedSourceSearchResult,
+    TrustedSourceSyncOptions,
+    TrustedSourceSyncStats,
+    registry,
+)
 from app.trusted_source_search_service import LocalIndexSearchAdapterMixin
 
 
@@ -96,6 +105,86 @@ def _parse_datetime_date(value: Any) -> date | None:
 def _detail_hash(payload: Any) -> str:
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _external_search_keyword(query: TrustedSourceSearchQuery) -> str | None:
+    parts = normalize_standard_no(query.normalized_standard_no or query.standard_no)
+    if parts.main_no and parts.year:
+        return f"{parts.main_no}-{parts.year}"
+    if parts.main_no:
+        return parts.main_no
+    if query.standard_no:
+        return query.standard_no.strip()[:80]
+    for keyword in query.keywords:
+        token = keyword.strip()
+        if token:
+            return token[:80]
+    if query.standard_name:
+        return query.standard_name.strip()[:80]
+    return None
+
+
+def _score_external_match(
+    *,
+    query: TrustedSourceSearchQuery,
+    standard_no: str | None,
+    standard_name: str | None,
+) -> tuple[int, str]:
+    number_parts = normalize_standard_no(standard_no)
+    title_score = int(SequenceMatcher(None, query.standard_name or "", standard_name or "").ratio() * 100)
+    number_match = bool(
+        query.normalized_standard_no
+        and number_parts.normalized
+        and query.normalized_standard_no == number_parts.normalized
+    ) or bool(query.standard_no and standard_no and query.standard_no == standard_no)
+    for keyword in query.keywords:
+        token = keyword.strip().upper()
+        if token and standard_no and token in standard_no.upper():
+            number_match = True
+            break
+    if number_match and title_score >= 80:
+        return 95, "外网实时命中：编号与标题高度一致"
+    if number_match:
+        return 90, "外网实时命中：标准编号一致"
+    if title_score >= 80:
+        return 80, f"外网实时命中：标题相似度 {title_score}%"
+    return max(55, title_score), f"外网实时命中：标题相似度 {title_score}%"
+
+
+def _hbdb_row_to_search_result(
+    source: models.TrustedSource,
+    row: dict[str, Any],
+    *,
+    query: TrustedSourceSearchQuery,
+    adapter_key: str,
+    base_url: str,
+) -> TrustedSourceSearchResult | None:
+    item_id = _text(row.get("pk"))
+    if not item_id:
+        return None
+    standard_no = _text(row.get("code"))
+    standard_name = _text(row.get("chName")) or standard_no or item_id
+    number_parts = normalize_standard_no(standard_no)
+    score, reason = _score_external_match(query=query, standard_no=standard_no, standard_name=standard_name)
+    return TrustedSourceSearchResult(
+        source_id=source.id,
+        source_name=source.source_name or "",
+        standard_no=standard_no,
+        normalized_standard_no=number_parts.normalized,
+        standard_name=standard_name,
+        source_status=_text(row.get("status")),
+        publish_date=_date_from_millis(row.get("issueDate")),
+        effective_date=_date_from_millis(row.get("actDate")),
+        detail_url=f"{base_url.rstrip('/')}/stdDetail/{item_id}",
+        pdf_trial_url=f"{base_url.rstrip('/')}/portal/online/{item_id}",
+        confidence_score=score,
+        match_reason=reason,
+        raw={
+            "search_backend": "external",
+            "adapter_key": adapter_key,
+            "external_item_id": item_id,
+        },
+    )
 
 
 def _system_status(source_status: str | None) -> str:
@@ -384,6 +473,48 @@ class HbDbAdapter(LocalIndexSearchAdapterMixin):
         db.commit()
         return stats
 
+    def search_external(self, db: Session, source_id: int, query: TrustedSourceSearchQuery) -> list[TrustedSourceSearchResult]:
+        source = db.get(models.TrustedSource, source_id)
+        if source is None:
+            return []
+        keyword = _external_search_keyword(query)
+        if not keyword:
+            return []
+        with self._client() as client:
+            response = client.post(
+                f"{self.base_url}/stdQueryList",
+                data={
+                    "current": 1,
+                    "size": 20,
+                    "key": keyword,
+                    "ministry": "",
+                    "industry": "",
+                    "pubdate": "",
+                    "date": "",
+                    "status": "",
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+        records = payload.get("records") if isinstance(payload, dict) else []
+        if not isinstance(records, list):
+            return []
+        results: list[TrustedSourceSearchResult] = []
+        for row in records:
+            if not isinstance(row, dict):
+                continue
+            item = _hbdb_row_to_search_result(
+                source,
+                row,
+                query=query,
+                adapter_key=self.adapter_key,
+                base_url=self.base_url,
+            )
+            if item is not None:
+                results.append(item)
+        results.sort(key=lambda item: item.confidence_score, reverse=True)
+        return results[:20]
+
 
 class TtbzAdapter(LocalIndexSearchAdapterMixin):
     adapter_key = "samr_group_standard_public"
@@ -559,6 +690,69 @@ class TtbzAdapter(LocalIndexSearchAdapterMixin):
         stats.errors = errors
         db.commit()
         return stats
+
+    def search_external(self, db: Session, source_id: int, query: TrustedSourceSearchQuery) -> list[TrustedSourceSearchResult]:
+        source = db.get(models.TrustedSource, source_id)
+        if source is None:
+            return []
+        keyword = _external_search_keyword(query)
+        if not keyword:
+            return []
+        search_payloads: list[dict[str, str]] = [{"standardNo": keyword}]
+        if query.standard_name and re.search(r"[\u4e00-\u9fff]", query.standard_name):
+            search_payloads.append({"standardName": query.standard_name.strip()[:80]})
+        if re.search(r"[\u4e00-\u9fff]", keyword):
+            search_payloads.append({"standardName": keyword[:80]})
+
+        results: list[TrustedSourceSearchResult] = []
+        seen_ids: set[str] = set()
+        with self._client() as client:
+            for payload in search_payloads:
+                try:
+                    response = client.post(
+                        "https://www.ttbz.org.cn/cms-proxy/ms/portal/standardInfo/getPortalStandardList",
+                        data={"pageNo": 1, "pageSize": 20, **payload},
+                    )
+                    response.raise_for_status()
+                    body = response.json()
+                except (httpx.HTTPError, ValueError):
+                    continue
+                data = body.get("data") if isinstance(body, dict) else {}
+                rows = data.get("rows") if isinstance(data, dict) else []
+                if not isinstance(rows, list):
+                    continue
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    item_id = _text(row.get("standardUniqueId") or row.get("id"))
+                    if not item_id or item_id in seen_ids:
+                        continue
+                    seen_ids.add(item_id)
+                    standard_no = _text(row.get("standardNo"))
+                    standard_name = _text(row.get("standardName")) or item_id
+                    number_parts = normalize_standard_no(standard_no)
+                    score, reason = _score_external_match(query=query, standard_no=standard_no, standard_name=standard_name)
+                    results.append(
+                        TrustedSourceSearchResult(
+                            source_id=source.id,
+                            source_name=source.source_name or "",
+                            standard_no=standard_no,
+                            normalized_standard_no=number_parts.normalized,
+                            standard_name=standard_name,
+                            source_status=_text(row.get("standardStatusName") or row.get("statusName")),
+                            detail_url=f"https://www.ttbz.org.cn/standardDetail/{item_id}.html",
+                            confidence_score=score,
+                            match_reason=reason,
+                            raw={
+                                "search_backend": "external",
+                                "adapter_key": self.adapter_key,
+                                "external_item_id": item_id,
+                            },
+                        )
+                    )
+        results.sort(key=lambda item: item.confidence_score, reverse=True)
+        return results[:20]
+
 
 def _clean_text(value: str | None) -> str:
     return " ".join((value or "").split())

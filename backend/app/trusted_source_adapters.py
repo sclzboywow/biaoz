@@ -103,6 +103,9 @@ class TrustedSourceAdapter(Protocol):
     def search(self, db: Session, source_id: int, query: TrustedSourceSearchQuery) -> list[TrustedSourceSearchResult]:
         ...
 
+    def search_external(self, db: Session, source_id: int, query: TrustedSourceSearchQuery) -> list[TrustedSourceSearchResult]:
+        ...
+
 
 class TrustedSourceAdapterRegistry:
     def __init__(self) -> None:

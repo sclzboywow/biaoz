@@ -656,9 +656,17 @@ class TrustedSourceSearchResultOut(BaseModel):
     search_backend: str | None = None
 
 
+class TrustedSourceSearchErrorOut(BaseModel):
+    source_id: int
+    source_name: str
+    adapter_key: str | None = None
+    message: str
+
+
 class TrustedSourceSearchResponse(BaseModel):
     total: int
     items: list[TrustedSourceSearchResultOut]
+    errors: list[TrustedSourceSearchErrorOut] = Field(default_factory=list)
 
 
 class GuobiaoSyncResult(BaseModel):
@@ -1071,6 +1079,7 @@ class LocalFileRecognitionCandidateOut(OrmModel):
     match_score: int
     match_reason: str | None = None
     decision_advice: str | None = None
+    search_backend: str | None = None
     created_at: datetime
 
 
@@ -1113,3 +1122,11 @@ class LocalFileIntakeConfirmResult(BaseModel):
     document_id: int | None = None
     version_id: int | None = None
     linked_resources: int | None = None
+
+
+class LocalFileIntakeExternalSearchResponse(BaseModel):
+    task: LocalFileIntakeTaskOut
+    candidates: list[LocalFileRecognitionCandidateOut]
+    logs: list[LocalFileIntakeLogOut]
+    added: int = 0
+    errors: list[TrustedSourceSearchErrorOut] = Field(default_factory=list)
