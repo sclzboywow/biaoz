@@ -21,7 +21,8 @@ from app.governance_decision_service import run_governance_decisions  # noqa: E4
 from app.governance_pipeline import sync_pipeline_phase  # noqa: E402
 from app.governance_service import profile_url_sources_batch  # noqa: E402
 from app.ocr_download_service import create_ocr_tasks_from_decisions  # noqa: E402
-from app.settings_store import ensure_default_settings, get_bool_setting  # noqa: E402
+from app.post_decision_ingest_service import collect_ingestible_resource_ids, trigger_post_decision_ingest  # noqa: E402
+from app.settings_store import ensure_default_settings, get_bool_setting, get_int_setting  # noqa: E402
 
 LOG_DIR = ROOT / "logs"
 PROFILE_CURSOR = LOG_DIR / "governance-loop.url-profile.cursor"
@@ -110,6 +111,7 @@ def main() -> int:
     parser.add_argument("--skip-decisions", action="store_true")
     parser.add_argument("--skip-ocr-tasks", action="store_true")
     parser.add_argument("--skip-alert-sweep", action="store_true")
+    parser.add_argument("--skip-post-decision-ingest", action="store_true")
     parser.add_argument("--force-profile", action="store_true", help="画像阶段完成后仍强制跑 URL 画像")
     args = parser.parse_args()
 
@@ -148,6 +150,18 @@ def main() -> int:
         decision_result = run_decisions_batch(limit=args.decision_limit)
         summary["decisions"] = decision_result
         print("governance_decisions_summary", json.dumps(decision_result, ensure_ascii=False))
+        if not args.skip_post_decision_ingest:
+            with SessionLocal() as db:
+                ensure_default_settings(db)
+                ingest_ids = collect_ingestible_resource_ids(
+                    db,
+                    decision_stats=decision_result,
+                    run_id=decision_result.get("run_id"),
+                )
+                ingest_limit = get_int_setting(db, "post_decision_ingest_limit", 50)
+                ingest_result = trigger_post_decision_ingest(db, resource_ids=ingest_ids, limit=ingest_limit)
+            summary["post_decision_ingest"] = ingest_result
+            print("governance_post_decision_ingest_summary", json.dumps(ingest_result, ensure_ascii=False, default=str))
 
     if not args.skip_ocr_tasks:
         ocr_result = run_ocr_tasks_batch(limit=args.ocr_task_limit)

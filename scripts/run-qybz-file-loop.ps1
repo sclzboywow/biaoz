@@ -20,6 +20,7 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $cursorFile = Join-Path $logDir "qybz-file-loop.cursor"
 $pidFile = Join-Path $logDir "qybz-file-loop.pid"
 . (Join-Path $PSScriptRoot "loop-pid-utils.ps1")
+. (Join-Path $PSScriptRoot "loop-log-utils.ps1")
 Write-LoopPidFile -Path $pidFile -ProcessId $PID
 
 function Write-QybzLog {
@@ -72,7 +73,7 @@ do {
         --max-consecutive-errors $MaxConsecutiveErrors `
         --defer-baidu-upload `
         @cursorArg 2>&1
-    $output | ForEach-Object { Write-Output $_ }
+    Write-CompactLoopOutput -OutputLines $output
     Update-QybzCursorFromOutput -OutputLines $output
     Write-QybzLog "files finish exit=$LASTEXITCODE"
 

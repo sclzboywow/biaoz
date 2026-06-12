@@ -16,6 +16,7 @@ $env:PYTHONIOENCODING = "utf-8"
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $python = Join-Path $repoRoot "backend\.venv\Scripts\python.exe"
+. (Join-Path $PSScriptRoot "loop-log-utils.ps1")
 
 function Write-TrustedLog {
     param([string]$Message)
@@ -45,7 +46,8 @@ while ($true) {
     }
 
     Write-TrustedLog "trusted sources start"
-    & $python @args
+    $output = & $python @args 2>&1
+    Write-CompactLoopOutput -OutputLines $output
     Write-TrustedLog "trusted sources finish exit=$LASTEXITCODE"
     if ($Once) {
         break

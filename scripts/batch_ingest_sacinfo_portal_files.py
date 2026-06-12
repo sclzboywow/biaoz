@@ -174,6 +174,52 @@ def select_candidates(
         return candidates
 
 
+def select_candidates_by_ids(
+    *,
+    source_id: int,
+    resource_ids: list[int],
+    force: bool = False,
+) -> list[Candidate]:
+    if not resource_ids:
+        return []
+    with SessionLocal() as db:
+        resources = list(
+            db.scalars(
+                select(models.StandardResource)
+                .where(
+                    models.StandardResource.source_id == source_id,
+                    models.StandardResource.id.in_(resource_ids),
+                )
+                .order_by(models.StandardResource.id)
+            ).all()
+        )
+        candidates: list[Candidate] = []
+        for resource in resources:
+            portal = extract_portal_info(
+                resource.pdf_trial_url,
+                resource.detail_url,
+                source_book_id=resource.source_book_id,
+            )
+            if not portal:
+                continue
+            base_url, pk = portal
+            canonical_url = portal_online_url(base_url, pk)
+            if not force and _has_archived_file(db, canonical_url):
+                continue
+            standard_no = (resource.standard_no or "").strip() or pk
+            candidates.append(
+                Candidate(
+                    resource_id=resource.id,
+                    standard_no=standard_no,
+                    standard_name=resource.standard_name,
+                    base_url=base_url,
+                    pk=pk,
+                    canonical_url=canonical_url,
+                )
+            )
+        return candidates
+
+
 def _create_or_get_url_source(
     db,
     canonical_url: str,
@@ -253,6 +299,7 @@ def main() -> int:
     parser.add_argument("--max-attempts", type=int, default=int(os.getenv("SACINFO_CAPTCHA_MAX_ATTEMPTS", "3")))
     parser.add_argument("--failure-cooldown-hours", type=float, default=2.0)
     parser.add_argument("--max-consecutive-errors", type=int, default=5)
+    parser.add_argument("--only-resource-ids", type=str, help="逗号分隔的 standard_resource id，用于决策后优先采集")
     add_baidu_upload_args(parser)
     args = parser.parse_args()
 
@@ -260,13 +307,17 @@ def main() -> int:
     if args.platform and not adapter_key:
         adapter_key = ADAPTER_KEYS[args.platform]
     source_id, source_name, resolved_adapter = resolve_source(source_id=args.source_id, adapter_key=adapter_key)
-    candidates = select_candidates(
-        source_id=source_id,
-        limit=max(args.limit, 1),
-        force=args.force,
-        start_after_resource_id=args.start_after_resource_id,
-        failure_cooldown_hours=args.failure_cooldown_hours,
-    )
+    if args.only_resource_ids:
+        only_ids = [int(item.strip()) for item in args.only_resource_ids.split(",") if item.strip().isdigit()]
+        candidates = select_candidates_by_ids(source_id=source_id, resource_ids=only_ids, force=args.force)
+    else:
+        candidates = select_candidates(
+            source_id=source_id,
+            limit=max(args.limit, 1),
+            force=args.force,
+            start_after_resource_id=args.start_after_resource_id,
+            failure_cooldown_hours=args.failure_cooldown_hours,
+        )
     print(
         "sacinfo_batch_candidates "
         + json.dumps(
@@ -316,7 +367,6 @@ def main() -> int:
                 )
             except SamrPortalDownloadUnavailableError as exc:
                 error_count += 1
-                consecutive_errors += 1
                 last_resource_id = item.resource_id
                 message = str(exc)
                 if "未提供验证码下载入口" in message:
@@ -381,7 +431,11 @@ def main() -> int:
                     flush=True,
                 )
 
-            if args.max_consecutive_errors > 0 and consecutive_errors >= args.max_consecutive_errors:
+            if (
+                args.max_consecutive_errors > 0
+                and consecutive_errors >= args.max_consecutive_errors
+                and not args.only_resource_ids
+            ):
                 print(
                     "sacinfo_batch_summary "
                     + json.dumps(

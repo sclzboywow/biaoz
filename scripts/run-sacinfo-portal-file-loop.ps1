@@ -25,6 +25,7 @@ $loopSlug = switch ($Platform) {
 }
 $pidFile = Join-Path $logDir "$loopSlug.pid"
 . (Join-Path $PSScriptRoot "loop-pid-utils.ps1")
+. (Join-Path $PSScriptRoot "loop-log-utils.ps1")
 Write-LoopPidFile -Path $pidFile -ProcessId $PID
 
 function Get-SacinfoCursorPath {
@@ -94,7 +95,7 @@ do {
             --max-attempts $MaxAttempts `
             --defer-baidu-upload `
             @cursorArg 2>&1
-        $output | ForEach-Object { Write-Output $_ }
+        Write-CompactLoopOutput -OutputLines $output
         Update-SacinfoCursorFromOutput -Name $platform -OutputLines $output
         Write-SacinfoLog "files finish platform=$platform exit=$LASTEXITCODE"
     }

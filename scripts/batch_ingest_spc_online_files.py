@@ -183,6 +183,43 @@ def select_candidates(
         return candidates
 
 
+def select_candidates_by_ids(
+    *,
+    resource_ids: list[int],
+    force: bool = False,
+) -> list[Candidate]:
+    if not resource_ids:
+        return []
+    with SessionLocal() as db:
+        resources = list(
+            db.scalars(
+                select(models.StandardResource)
+                .where(models.StandardResource.id.in_(resource_ids))
+                .order_by(models.StandardResource.id)
+            ).all()
+        )
+        candidates: list[Candidate] = []
+        seen_standard_nos: set[str] = set()
+        for resource in resources:
+            standard_no = (resource.standard_no or "").strip()
+            detail_url = (resource.detail_url or "").strip()
+            if not standard_no or not detail_url or standard_no in seen_standard_nos:
+                continue
+            seen_standard_nos.add(standard_no)
+            standclass = RESOURCE_TYPE_TO_STANDCLASS.get(resource.resource_type or "", "CN")
+            candidates.append(
+                Candidate(
+                    resource_id=resource.id,
+                    standard_no=standard_no,
+                    standard_name=resource.standard_name,
+                    detail_url=detail_url,
+                    standclass=standclass,
+                    resource_type=resource.resource_type,
+                )
+            )
+        return candidates
+
+
 def _precheck_archived(item: Candidate):
     with SessionLocal() as db:
         return find_archived_result(db, item.standard_no)
@@ -203,20 +240,25 @@ def main() -> int:
     parser.add_argument("--cooldown-on-rate-limit", type=int, default=0)
     parser.add_argument("--failure-cooldown-hours", type=float, default=2.0)
     parser.add_argument("--max-consecutive-errors", type=int, default=8)
+    parser.add_argument("--only-resource-ids", type=str, help="逗号分隔的 standard_resource id，用于决策后优先采集")
     parser.add_argument("--defer-baidu-upload", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--baidu-upload-workers", type=int, default=2)
     args = parser.parse_args()
 
     source_id = args.source_id or spc_source_id()
-    candidates = select_candidates(
-        source_id=source_id,
-        limit=max(args.limit, 1),
-        category=args.category,
-        force=args.force,
-        start_after_resource_id=args.start_after_resource_id,
-        scan_limit=max(args.scan_limit, args.limit),
-        failure_cooldown_hours=args.failure_cooldown_hours,
-    )
+    if args.only_resource_ids:
+        only_ids = [int(item.strip()) for item in args.only_resource_ids.split(",") if item.strip().isdigit()]
+        candidates = select_candidates_by_ids(resource_ids=only_ids, force=args.force)
+    else:
+        candidates = select_candidates(
+            source_id=source_id,
+            limit=max(args.limit, 1),
+            category=args.category,
+            force=args.force,
+            start_after_resource_id=args.start_after_resource_id,
+            scan_limit=max(args.scan_limit, args.limit),
+            failure_cooldown_hours=args.failure_cooldown_hours,
+        )
     print("spc_batch_candidates " + json.dumps([item.__dict__ for item in candidates], ensure_ascii=False), flush=True)
     if args.dry_run or not candidates:
         return 0

@@ -30,6 +30,7 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $cursorFile = Join-Path $logDir "ttbz-file-loop.cursor"
 $pidFile = Join-Path $logDir "ttbz-file-loop.pid"
 . (Join-Path $PSScriptRoot "loop-pid-utils.ps1")
+. (Join-Path $PSScriptRoot "loop-log-utils.ps1")
 Write-LoopPidFile -Path $pidFile -ProcessId $PID
 
 function Write-TtbzLog {
@@ -104,7 +105,7 @@ do {
         --defer-baidu-upload `
         @proxyArg `
         @cursorArg 2>&1
-    $output | ForEach-Object { Write-Output $_ }
+    Write-CompactLoopOutput -OutputLines $output
     Update-TtbzCursorFromOutput -OutputLines $output
     Write-TtbzLog "files finish exit=$LASTEXITCODE"
 

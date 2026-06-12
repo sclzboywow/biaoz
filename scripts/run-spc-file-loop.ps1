@@ -23,6 +23,7 @@ $logDir = Join-Path $repoRoot "logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $pidFile = Join-Path $logDir "spc-file-loop.pid"
 . (Join-Path $PSScriptRoot "loop-pid-utils.ps1")
+. (Join-Path $PSScriptRoot "loop-log-utils.ps1")
 Write-LoopPidFile -Path $pidFile -ProcessId $PID
 
 function Get-SpcCursorPath {
@@ -156,7 +157,7 @@ do {
             --cooldown-on-rate-limit 0 `
             --defer-baidu-upload `
             @cursorArg 2>&1
-        $output | ForEach-Object { Write-Output $_ }
+        Write-CompactLoopOutput -OutputLines $output
         $candidateCount = Update-SpcCursorFromOutput -Category $category -OutputLines $output
         if ($candidateCount -eq 0) {
             Reset-SpcCursor -Category $category

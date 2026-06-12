@@ -118,6 +118,9 @@ def _is_standard_number_slash(head: str, tail: str) -> bool:
         return False
     if not tail:
         return False
+    head_upper = head.upper()
+    if head_upper in {"T", "Q"}:
+        return bool(re.match(r"[A-Z0-9]", tail, re.I))
     if tail[0].upper() == "T":
         return True
     return bool(re.match(r"[\s\-_.]*\d", tail))

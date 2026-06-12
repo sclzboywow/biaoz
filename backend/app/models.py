@@ -664,3 +664,21 @@ class LocalFileIntakeLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
     task: Mapped["LocalFileIntakeTask"] = relationship(back_populates="logs")
+
+
+class CertificationRecord(TimestampMixin, Base):
+    __tablename__ = "certification_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("trusted_sources.id"), nullable=False, index=True)
+    source_item_id: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
+    record_type: Mapped[str | None] = mapped_column(String(120), index=True)
+    org_name: Mapped[str | None] = mapped_column(String(500), index=True)
+    certificate_no: Mapped[str | None] = mapped_column(String(160), index=True)
+    standard_refs: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str | None] = mapped_column(String(80), index=True)
+    issue_date: Mapped[date | None] = mapped_column(Date)
+    expire_date: Mapped[date | None] = mapped_column(Date)
+    detail_url: Mapped[str | None] = mapped_column(Text)
+    raw_json: Mapped[str | None] = mapped_column(Text)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

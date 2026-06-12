@@ -129,6 +129,39 @@ def select_candidates(
         return candidates
 
 
+def select_candidates_by_ids(
+    *,
+    resource_ids: list[int],
+    force: bool = False,
+) -> list[Candidate]:
+    if not resource_ids:
+        return []
+    with SessionLocal() as db:
+        resources = list(
+            db.scalars(
+                select(models.StandardResource)
+                .where(models.StandardResource.id.in_(resource_ids))
+                .order_by(models.StandardResource.id)
+            ).all()
+        )
+        candidates: list[Candidate] = []
+        for resource in resources:
+            detail_url = (resource.detail_url or "").strip()
+            if not detail_url:
+                continue
+            if not force and _has_archived_file(db, detail_url):
+                continue
+            candidates.append(
+                Candidate(
+                    resource_id=resource.id,
+                    standard_no=(resource.standard_no or "").strip() or resource.source_book_id or detail_url,
+                    standard_name=resource.standard_name,
+                    detail_url=detail_url,
+                )
+            )
+        return candidates
+
+
 def ingest_one(
     candidate: Candidate,
     *,
@@ -184,17 +217,22 @@ def main() -> int:
     parser.add_argument("--delay", type=float, default=2.0)
     parser.add_argument("--failure-cooldown-hours", type=float, default=2.0)
     parser.add_argument("--max-consecutive-errors", type=int, default=8)
+    parser.add_argument("--only-resource-ids", type=str, help="逗号分隔的 standard_resource id，用于决策后优先采集")
     add_baidu_upload_args(parser)
     args = parser.parse_args()
 
     source_id, source_name = resolve_source(source_id=args.source_id)
-    candidates = select_candidates(
-        source_id=source_id,
-        limit=max(args.limit, 1),
-        force=args.force,
-        start_after_resource_id=args.start_after_resource_id,
-        failure_cooldown_hours=args.failure_cooldown_hours,
-    )
+    if args.only_resource_ids:
+        only_ids = [int(item.strip()) for item in args.only_resource_ids.split(",") if item.strip().isdigit()]
+        candidates = select_candidates_by_ids(resource_ids=only_ids, force=args.force)
+    else:
+        candidates = select_candidates(
+            source_id=source_id,
+            limit=max(args.limit, 1),
+            force=args.force,
+            start_after_resource_id=args.start_after_resource_id,
+            failure_cooldown_hours=args.failure_cooldown_hours,
+        )
     print("qybz_batch_candidates " + json.dumps([item.__dict__ for item in candidates], ensure_ascii=False), flush=True)
     if args.dry_run or not candidates:
         return 0

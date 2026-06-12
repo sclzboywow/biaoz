@@ -115,6 +115,7 @@ onMounted(async () => {
       <el-table-column prop="attempt_count" label="尝试次数" width="90" />
       <el-table-column prop="last_error" label="最后错误" min-width="220" show-overflow-tooltip />
       <el-table-column prop="created_at" label="创建时间" width="170"><template #default="{ row }">{{ formatDateTime(row.created_at) }}</template></el-table-column>
+      <el-table-column prop="finished_at" label="完成时间" width="170"><template #default="{ row }">{{ formatDateTime(row.finished_at) }}</template></el-table-column>
       <el-table-column label="操作" width="420" fixed="right">
         <template #default="{ row }">
           <div class="row-actions">

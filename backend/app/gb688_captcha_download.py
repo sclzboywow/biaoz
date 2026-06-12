@@ -98,6 +98,21 @@ def solve_captcha_image(image_bytes: bytes) -> str:
     return code[:8]
 
 
+def _warm_download_page(http: httpx.Client, download_page_url: str) -> httpx.Response:
+    """访问下载页建立会话。online 页作 Referer 会导致部分 hcno 返回 404。"""
+    headers = {"Accept": "text/html,*/*"}
+    page = http.get(download_page_url, headers=headers)
+    if page.status_code == 404:
+        page = http.get(
+            download_page_url,
+            headers={**headers, "Referer": f"{OPENSTD_SITE}/"},
+        )
+    if page.status_code == 404:
+        raise OpenstdDownloadUnavailableError(f"下载页不存在：{download_page_url}")
+    page.raise_for_status()
+    return page
+
+
 def _download_with_endpoints(
     http: httpx.Client,
     *,
@@ -114,10 +129,7 @@ def _download_with_endpoints(
 
     for attempt in range(1, max(max_attempts, 1) + 1):
         try:
-            page = http.get(download_page_url, headers={"Accept": "text/html,*/*", "Referer": online_page_url})
-            if page.status_code == 404:
-                raise OpenstdDownloadUnavailableError(f"下载页不存在：{download_page_url}")
-            page.raise_for_status()
+            _warm_download_page(http, download_page_url)
 
             captcha = http.get(
                 captcha_url,
@@ -144,6 +156,8 @@ def _download_with_endpoints(
 
             response = http.get(file_url, headers={"Accept": "application/pdf,*/*", "Referer": download_page_url})
             response.raise_for_status()
+            if not response.content:
+                raise OpenstdDownloadUnavailableError(f"官方未返回 PDF 内容（空响应）：{file_url}")
             if not response.content.startswith(b"%PDF"):
                 snippet = response.content[:200].decode("utf-8", errors="ignore")
                 raise OpenstdDownloadUnavailableError(f"官方返回内容不是 PDF：{snippet[:120]!r}")
@@ -196,7 +210,7 @@ def download_openstd_pdf(
             )
         except OpenstdDownloadUnavailableError as openstd_error:
             message = str(openstd_error)
-            if "404" not in message and "不存在" not in message:
+            if "404" not in message and "不存在" not in message and "下载页不存在" not in message:
                 raise
             return _download_with_endpoints(
                 http,

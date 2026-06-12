@@ -143,6 +143,7 @@ WORKER_SPECS: tuple[dict[str, Any], ...] = (
         "pid_file": "ocr-worker.pid",
         "log_file": "ocr-worker.out.log",
         "stale_minutes": 15,
+        "db_activity": "ocr_download_tasks",
     },
     {
         "key": "governance_loop",
@@ -264,6 +265,96 @@ def _last_matching_payload(lines: list[str], prefixes: list[str]) -> dict[str, A
     return None
 
 
+def _ocr_download_task_activity(db: Session, minutes: int) -> dict[str, Any]:
+    since = datetime.now(UTC) - timedelta(minutes=minutes)
+    row = db.execute(
+        text(
+            """
+            SELECT
+              COUNT(*) FILTER (WHERE status = 'RUNNING') AS running,
+              COUNT(*) FILTER (WHERE status = 'ARCHIVED' AND finished_at >= :since) AS archived,
+              COUNT(*) FILTER (WHERE status = 'DUPLICATE_FILE' AND finished_at >= :since) AS duplicate,
+              COUNT(*) FILTER (
+                WHERE status IN ('OCR_FAILED', 'CAPTCHA_FAILED', 'DOWNLOAD_FAILED', 'PDF_INVALID')
+                  AND finished_at >= :since
+              ) AS failed,
+              COUNT(*) FILTER (WHERE started_at >= :since) AS started,
+              COUNT(*) FILTER (WHERE status = 'PENDING') AS pending,
+              MAX(COALESCE(finished_at, started_at)) AS latest
+            FROM ocr_download_tasks
+            """
+        ),
+        {"since": since},
+    ).mappings().one()
+    return dict(row)
+
+
+def _worker_db_activity(db: Session | None, spec: dict[str, Any]) -> dict[str, Any] | None:
+    if db is None:
+        return None
+    activity_key = spec.get("db_activity")
+    if activity_key == "ocr_download_tasks":
+        minutes = int(spec.get("stale_minutes", 15))
+        activity = _ocr_download_task_activity(db, minutes)
+        activity["summary"] = {
+            "ok": int(activity.get("archived") or 0) + int(activity.get("duplicate") or 0),
+            "errors": int(activity.get("failed") or 0),
+            "total": int(activity.get("started") or 0),
+            "pending": int(activity.get("pending") or 0),
+        }
+        return activity
+    return None
+
+
+def _last_line_index(lines: list[str], needle: str) -> int:
+    for index in range(len(lines) - 1, -1, -1):
+        if needle in lines[index]:
+            return index
+    return -1
+
+
+def _openstd_idle_status(lines: list[str], last_exit: int | None) -> tuple[str, str] | None:
+    empty_idx = _last_line_index(lines, "openstd_batch_candidates []")
+    if empty_idx < 0:
+        return None
+    summary_idx = -1
+    for index in range(len(lines) - 1, -1, -1):
+        parsed = _parse_json_line(lines[index])
+        if parsed and parsed[0] == "openstd_batch_summary":
+            summary_idx = index
+            break
+    if empty_idx > summary_idx and last_exit in (None, 0):
+        return "running", "当前无待下载候选，OpenSTD 循环空闲运行中"
+    return None
+
+
+def _status_from_db_activity(spec: dict[str, Any], activity: dict[str, Any]) -> tuple[str, str] | None:
+    running = int(activity.get("running") or 0)
+    archived = int(activity.get("archived") or 0)
+    duplicate = int(activity.get("duplicate") or 0)
+    failed = int(activity.get("failed") or 0)
+    pending = int(activity.get("pending") or 0)
+    started = int(activity.get("started") or 0)
+    stale_minutes = spec.get("stale_minutes", 10)
+    active_recent = running > 0 or started > 0 or archived + duplicate > 0
+
+    latest = activity.get("latest")
+    if isinstance(latest, datetime) and latest.tzinfo is None:
+        latest = latest.replace(tzinfo=UTC)
+    stale_after = timedelta(minutes=stale_minutes)
+    latest_fresh = isinstance(latest, datetime) and latest >= datetime.now(UTC) - stale_after
+
+    if not active_recent and not latest_fresh:
+        return None
+
+    if failed > 0 and archived + duplicate == 0 and running == 0 and started == 0:
+        return "warning", f"近 {stale_minutes} 分钟 OCR 失败 {failed} 条，待处理 {pending} 条"
+    return (
+        "running",
+        f"任务队列活跃：运行 {running}，近 {stale_minutes} 分钟启动 {started}，归档 {archived + duplicate}，失败 {failed}，待 OCR {pending}",
+    )
+
+
 def _status_from(
     spec: dict[str, Any],
     pid: int | None,
@@ -271,8 +362,15 @@ def _status_from(
     log_path: Path,
     lines: list[str],
     channel_activity: dict[str, Any] | None,
+    db_activity: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
+    db_status = _status_from_db_activity(spec, db_activity) if db_activity else None
+    if db_status:
+        return db_status
+
     if not pid and not log_path.exists():
+        if db_activity and int(db_activity.get("pending") or 0) > 0:
+            return "warning", f"无宿主机日志，但 OCR 队列仍有 {int(db_activity['pending'])} 条待处理"
         return "stopped", "没有 PID 和日志"
     mtime = datetime.fromtimestamp(log_path.stat().st_mtime, UTC) if log_path.exists() else None
     fresh = bool(mtime and mtime >= datetime.now(UTC) - timedelta(minutes=spec.get("stale_minutes", 10)))
@@ -284,6 +382,10 @@ def _status_from(
             break
     summary = _last_matching_payload(lines, spec.get("summary_prefixes", [])) or {}
     errors = int(summary.get("errors") or summary.get("failed") or 0)
+    if spec.get("key") == "openstd":
+        idle_status = _openstd_idle_status(lines, last_exit)
+        if idle_status:
+            return idle_status
     if fresh and (last_exit not in (None, 0) or errors > 0):
         return "warning", f"最近批次有失败：exit={last_exit}, errors={errors}"
     if fresh:
@@ -301,7 +403,13 @@ def _status_from(
     return "stopped", "进程未运行或 PID 已失效"
 
 
-def _worker_summary(log_root: Path, spec: dict[str, Any], channel_activity_map: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def _worker_summary(
+    log_root: Path,
+    spec: dict[str, Any],
+    channel_activity_map: dict[str, dict[str, Any]],
+    *,
+    db: Session | None = None,
+) -> dict[str, Any]:
     pid_path = log_root / spec["pid_file"]
     log_path = log_root / spec["log_file"]
     pid = _read_pid(pid_path)
@@ -309,9 +417,12 @@ def _worker_summary(log_root: Path, spec: dict[str, Any], channel_activity_map: 
     lines = _read_text(log_path).splitlines()
     tail = lines[-8:]
     channel_activity = channel_activity_map.get(spec.get("channel", ""))
-    status, status_message = _status_from(spec, pid, pid_alive, log_path, lines, channel_activity)
+    db_activity = _worker_db_activity(db, spec)
+    status, status_message = _status_from(spec, pid, pid_alive, log_path, lines, channel_activity, db_activity)
     summary = _last_matching_payload(lines, spec.get("summary_prefixes", []))
     upload_summary = _last_matching_payload(lines, spec.get("upload_prefixes", []))
+    if db_activity and db_activity.get("summary"):
+        summary = {**(summary or {}), **db_activity["summary"]}
     last_exit = None
     last_started = None
     last_finished = None
@@ -345,6 +456,7 @@ def _worker_summary(log_root: Path, spec: dict[str, Any], channel_activity_map: 
         "summary": summary,
         "upload_summary": upload_summary,
         "channel_activity": channel_activity,
+        "db_activity": db_activity,
         "tail": tail,
     }
 
@@ -376,7 +488,7 @@ def ingest_runtime_summary(db: Session, interval_minutes: int = 30) -> dict[str,
     log_root = _log_root()
     database = _database_summary(db, interval_minutes)
     channel_activity_map = {item["channel"]: item for item in database["channels"]}
-    workers = [_worker_summary(log_root, spec, channel_activity_map) for spec in WORKER_SPECS]
+    workers = [_worker_summary(log_root, spec, channel_activity_map, db=db) for spec in WORKER_SPECS]
     status_counts: dict[str, int] = {}
     for worker in workers:
         status_counts[worker["status"]] = status_counts.get(worker["status"], 0) + 1

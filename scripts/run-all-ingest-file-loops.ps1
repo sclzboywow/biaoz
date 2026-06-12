@@ -4,7 +4,8 @@ param(
     [switch]$IncludeTtbz,
     [ValidateSet("cn-only", "cn-jj", "all")]
     [string]$SpcFocusMode = "cn-only",
-    [int]$BaiduPanWorkers = 6
+    [int]$BaiduPanWorkers = 6,
+    [int]$MaxLoopLogMB = 100
 )
 
 $ErrorActionPreference = "Continue"
@@ -15,6 +16,20 @@ $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $logDir = Join-Path $repoRoot "logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 . (Join-Path $PSScriptRoot "loop-pid-utils.ps1")
+
+function Rotate-LoopLogIfLarge {
+    param([string]$Path, [int]$MaxMB)
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+    $item = Get-Item -LiteralPath $Path
+    if ($item.Length -lt ($MaxMB * 1MB)) {
+        return
+    }
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $archivePath = "$Path.$stamp"
+    Move-Item -LiteralPath $Path -Destination $archivePath -Force
+}
 
 function Start-BackgroundLoop {
     param(
@@ -32,6 +47,9 @@ function Start-BackgroundLoop {
         Write-Output "[$Name] already running pid=$existingPid"
         return
     }
+
+    Rotate-LoopLogIfLarge -Path $outLog -MaxMB $MaxLoopLogMB
+    Rotate-LoopLogIfLarge -Path $errLog -MaxMB $MaxLoopLogMB
 
     $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $ScriptPath) + $ScriptArgs
     $procInfo = Start-Process -FilePath "powershell.exe" -ArgumentList $argList -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru -WindowStyle Hidden

@@ -20,6 +20,7 @@ if (-not $IncludeDetail) {
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $python = Join-Path $repoRoot "backend\.venv\Scripts\python.exe"
+. (Join-Path $PSScriptRoot "loop-log-utils.ps1")
 
 function Write-SpcLog {
     param([string]$Message)
@@ -45,7 +46,8 @@ do {
     }
 
     Write-SpcLog "sliced metadata start"
-    & $python @args
+    $output = & $python @args 2>&1
+    Write-CompactLoopOutput -OutputLines $output
     Write-SpcLog "sliced metadata finish exit=$LASTEXITCODE"
 
     if ($Once) {

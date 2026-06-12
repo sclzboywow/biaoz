@@ -68,6 +68,7 @@ from app.governance_service import (
 )
 from app import samr_public_adapters  # noqa: F401  # imports and registers non-GB SAMR public adapters
 from app import spc_online_adapter  # noqa: F401  # imports and registers SPC online adapter
+from app import batch2_adapters  # noqa: F401  # imports and registers batch-2 trusted source adapters
 from app.samr_std_sync import _download_url, _online_url, sync_samr_std_resources  # noqa: F401  # imports and registers samr adapter
 from app.scheduler import run_url_check_loop
 from app.settings_store import (
@@ -805,6 +806,37 @@ def change_log_out(db: Session, log: models.StandardChangeLog) -> schemas.Standa
     )
 
 
+def standard_evidence_out(db: Session, evidence: models.StandardEvidence) -> schemas.StandardEvidenceOut:
+    resource = db.get(models.StandardResource, evidence.standard_resource_id) if evidence.standard_resource_id else None
+    document = db.get(models.Document, evidence.document_id) if evidence.document_id else None
+    return schemas.StandardEvidenceOut.model_validate(evidence).model_copy(
+        update={
+            "standard_no": resource.standard_no if resource else None,
+            "standard_name": resource.standard_name if resource else None,
+            "document_title": document.title if document else None,
+        }
+    )
+
+
+def standard_relation_out(db: Session, relation: models.StandardRelation) -> schemas.StandardRelationOut:
+    current = (
+        db.get(models.StandardResource, relation.current_standard_resource_id)
+        if relation.current_standard_resource_id
+        else None
+    )
+    related = (
+        db.get(models.StandardResource, relation.related_standard_resource_id)
+        if relation.related_standard_resource_id
+        else None
+    )
+    return schemas.StandardRelationOut.model_validate(relation).model_copy(
+        update={
+            "current_standard_name": current.standard_name if current else None,
+            "related_standard_name": related.standard_name if related else None,
+        }
+    )
+
+
 @api.get("/document-versions/{version_id}/file")
 def get_document_version_file(version_id: int, inline: bool = True, db: Session = Depends(get_db)):
     version = db.get(models.DocumentVersion, version_id)
@@ -1322,6 +1354,54 @@ def page_trusted_source_categories(
     return schemas.SourceCategoryPage(total=total, items=items, next_cursor=next_cursor, has_more=has_more)
 
 
+@api.get("/source-governance/raw-records/page", response_model=schemas.WpsStandardQueryRecordPage)
+def page_source_governance_raw_records(
+    page: int = 1,
+    page_size: int = 50,
+    cursor: int | None = None,
+    q: str | None = None,
+    source_sheet: str | None = None,
+    impl_status: str | None = None,
+    governance_status: str | None = None,
+    has_link: bool | None = None,
+    db: Session = Depends(get_db),
+):
+    page_size = min(max(page_size, 1), 200)
+    statement = select(models.WpsStandardQueryRecord)
+    count_statement = select(func.count(models.WpsStandardQueryRecord.id))
+    filters = []
+    if q:
+        keyword = f"%{q.strip()}%"
+        filters.append(
+            or_(
+                models.WpsStandardQueryRecord.wps_record_id.like(keyword),
+                models.WpsStandardQueryRecord.file_no.like(keyword),
+                models.WpsStandardQueryRecord.file_name.like(keyword),
+                models.WpsStandardQueryRecord.link_url.like(keyword),
+                models.WpsStandardQueryRecord.goto_url.like(keyword),
+                models.WpsStandardQueryRecord.fields_json.like(keyword),
+            )
+        )
+    if source_sheet:
+        filters.append(models.WpsStandardQueryRecord.source_sheet == source_sheet)
+    if impl_status:
+        filters.append(models.WpsStandardQueryRecord.impl_status == impl_status)
+    if governance_status:
+        filters.append(models.WpsStandardQueryRecord.governance_status == governance_status)
+    if has_link is not None:
+        link_filter = or_(
+            models.WpsStandardQueryRecord.link_url.is_not(None),
+            models.WpsStandardQueryRecord.goto_url.is_not(None),
+        )
+        filters.append(link_filter if has_link else ~link_filter)
+    for item in filters:
+        statement = statement.where(item)
+        count_statement = count_statement.where(item)
+    total = db.scalar(count_statement) or 0
+    items, next_cursor, has_more = cursor_window(db, statement, models.WpsStandardQueryRecord.id, page_size, cursor)
+    return schemas.WpsStandardQueryRecordPage(total=total, items=items, next_cursor=next_cursor, has_more=has_more)
+
+
 @api.post("/trusted-sources/{source_id}/discover-categories", response_model=schemas.CategoryDiscoveryResult)
 def discover_trusted_source_categories(source_id: int, db: Session = Depends(get_db)):
     source = db.get(models.TrustedSource, source_id)
@@ -1382,6 +1462,41 @@ def page_standard_resources(
     total = db.scalar(count_statement) or 0
     items, next_cursor, has_more = cursor_window(db, statement, models.StandardResource.id, page_size, cursor)
     return schemas.StandardResourcePage(total=total, items=items, next_cursor=next_cursor, has_more=has_more)
+
+
+@api.get("/certification-records/page", response_model=schemas.CertificationRecordPage)
+def page_certification_records(
+    page_size: int = 50,
+    cursor: int | None = None,
+    source_id: int | None = None,
+    q: str | None = None,
+    record_type: str | None = None,
+    db: Session = Depends(get_db),
+):
+    page_size = min(max(page_size, 1), 200)
+    statement = select(models.CertificationRecord)
+    count_statement = select(func.count(models.CertificationRecord.id))
+    filters = []
+    if source_id:
+        filters.append(models.CertificationRecord.source_id == source_id)
+    if record_type:
+        filters.append(models.CertificationRecord.record_type == record_type)
+    if q:
+        keyword = f"%{q}%"
+        filters.append(
+            or_(
+                models.CertificationRecord.org_name.like(keyword),
+                models.CertificationRecord.certificate_no.like(keyword),
+                models.CertificationRecord.standard_refs.like(keyword),
+                models.CertificationRecord.record_type.like(keyword),
+            )
+        )
+    for item in filters:
+        statement = statement.where(item)
+        count_statement = count_statement.where(item)
+    total = db.scalar(count_statement) or 0
+    items, next_cursor, has_more = cursor_window(db, statement, models.CertificationRecord.id, page_size, cursor)
+    return schemas.CertificationRecordPage(total=total, items=items, next_cursor=next_cursor, has_more=has_more)
 
 
 @api.post(
@@ -1706,6 +1821,120 @@ def page_source_status_sync_logs(
     return schemas.SourceStatusSyncLogPage(total=total, items=items, next_cursor=next_cursor, has_more=has_more)
 
 
+@api.get("/standard-evidence/page", response_model=schemas.StandardEvidencePage)
+def page_standard_evidence(
+    page_size: int = 50,
+    cursor: int | None = None,
+    q: str | None = None,
+    source_name: str | None = None,
+    source_level: str | None = None,
+    raw_status_text: str | None = None,
+    parsed_status: str | None = None,
+    db: Session = Depends(get_db),
+):
+    page_size = min(max(page_size, 1), 200)
+    statement = select(models.StandardEvidence)
+    count_statement = select(func.count(models.StandardEvidence.id))
+    filters = []
+    if q:
+        keyword = f"%{q.strip()}%"
+        resource_ids = select(models.StandardResource.id).where(
+            or_(
+                models.StandardResource.standard_no.like(keyword),
+                models.StandardResource.normalized_standard_no.like(keyword),
+                models.StandardResource.standard_name.like(keyword),
+            )
+        )
+        document_ids = select(models.Document.id).where(
+            or_(
+                models.Document.standard_no.like(keyword),
+                models.Document.normalized_standard_no.like(keyword),
+                models.Document.title.like(keyword),
+            )
+        )
+        filters.append(
+            or_(
+                models.StandardEvidence.source_name.like(keyword),
+                models.StandardEvidence.source_url.like(keyword),
+                models.StandardEvidence.raw_status_text.like(keyword),
+                models.StandardEvidence.parsed_status.like(keyword),
+                models.StandardEvidence.page_summary.like(keyword),
+                models.StandardEvidence.evidence_note.like(keyword),
+                models.StandardEvidence.standard_resource_id.in_(resource_ids),
+                models.StandardEvidence.document_id.in_(document_ids),
+            )
+        )
+    if source_name:
+        filters.append(models.StandardEvidence.source_name.like(f"%{source_name.strip()}%"))
+    if source_level:
+        filters.append(models.StandardEvidence.source_level == source_level)
+    if raw_status_text:
+        filters.append(models.StandardEvidence.raw_status_text.like(f"%{raw_status_text.strip()}%"))
+    if parsed_status:
+        filters.append(models.StandardEvidence.parsed_status.like(f"%{parsed_status.strip()}%"))
+    for item in filters:
+        statement = statement.where(item)
+        count_statement = count_statement.where(item)
+    total = db.scalar(count_statement) or 0
+    items, next_cursor, has_more = cursor_window(db, statement, models.StandardEvidence.id, page_size, cursor)
+    return schemas.StandardEvidencePage(
+        total=total,
+        items=[standard_evidence_out(db, item) for item in items],
+        next_cursor=next_cursor,
+        has_more=has_more,
+    )
+
+
+@api.get("/standard-relations/page", response_model=schemas.StandardRelationPage)
+def page_standard_relations(
+    page_size: int = 50,
+    cursor: int | None = None,
+    q: str | None = None,
+    relation_type: str | None = None,
+    is_manual_confirmed: bool | None = None,
+    db: Session = Depends(get_db),
+):
+    page_size = min(max(page_size, 1), 200)
+    statement = select(models.StandardRelation)
+    count_statement = select(func.count(models.StandardRelation.id))
+    filters = []
+    if q:
+        keyword = f"%{q.strip()}%"
+        resource_ids = select(models.StandardResource.id).where(
+            or_(
+                models.StandardResource.standard_no.like(keyword),
+                models.StandardResource.normalized_standard_no.like(keyword),
+                models.StandardResource.standard_name.like(keyword),
+            )
+        )
+        filters.append(
+            or_(
+                models.StandardRelation.current_standard_no.like(keyword),
+                models.StandardRelation.related_standard_no.like(keyword),
+                models.StandardRelation.relation_type.like(keyword),
+                models.StandardRelation.relation_text.like(keyword),
+                models.StandardRelation.source_url.like(keyword),
+                models.StandardRelation.current_standard_resource_id.in_(resource_ids),
+                models.StandardRelation.related_standard_resource_id.in_(resource_ids),
+            )
+        )
+    if relation_type:
+        filters.append(models.StandardRelation.relation_type == relation_type)
+    if is_manual_confirmed is not None:
+        filters.append(models.StandardRelation.is_manual_confirmed.is_(is_manual_confirmed))
+    for item in filters:
+        statement = statement.where(item)
+        count_statement = count_statement.where(item)
+    total = db.scalar(count_statement) or 0
+    items, next_cursor, has_more = cursor_window(db, statement, models.StandardRelation.id, page_size, cursor)
+    return schemas.StandardRelationPage(
+        total=total,
+        items=[standard_relation_out(db, item) for item in items],
+        next_cursor=next_cursor,
+        has_more=has_more,
+    )
+
+
 @api.patch("/standard-relations/{relation_id}", response_model=schemas.StandardRelationOut)
 def update_standard_relation(relation_id: int, payload: schemas.StandardRelationUpdate, db: Session = Depends(get_db)):
     relation = db.get(models.StandardRelation, relation_id)
@@ -1716,7 +1945,7 @@ def update_standard_relation(relation_id: int, payload: schemas.StandardRelation
         setattr(relation, field_name, value)
     db.commit()
     db.refresh(relation)
-    return relation
+    return standard_relation_out(db, relation)
 
 
 @api.post("/standard-file-matches/run", response_model=schemas.MatchRunResult)

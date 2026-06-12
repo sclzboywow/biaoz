@@ -36,6 +36,18 @@ TTBZ_REQUEST_DELAY_SECONDS = float(os.getenv("TTBZ_REQUEST_DELAY_SECONDS", "1"))
 TTBZ_RETRY_ATTEMPTS = int(os.getenv("TTBZ_RETRY_ATTEMPTS", "3"))
 QYBZ_REQUEST_DELAY_SECONDS = float(os.getenv("QYBZ_REQUEST_DELAY_SECONDS", "1"))
 
+MONITORED_CHANGE_FIELDS = {
+    "standard_no",
+    "standard_name",
+    "source_status",
+    "publish_date",
+    "effective_date",
+    "abolish_date",
+    "summary",
+    "change_info",
+    "pdf_trial_url",
+}
+
 
 @dataclass(frozen=True)
 class CategoryConfig:
@@ -223,6 +235,8 @@ def _ensure_single_category(db: Session, source: models.TrustedSource, config: C
 
 
 def _record_change(db: Session, resource: models.StandardResource, field_name: str, old_value: Any, new_value: Any) -> None:
+    if field_name not in MONITORED_CHANGE_FIELDS:
+        return
     old_text = "" if old_value is None else str(old_value)
     new_text = "" if new_value is None else str(new_value)
     if old_text == new_text:

@@ -102,11 +102,6 @@ const activeMenu = computed(() => route.path)
           <el-menu-item index="/settings/storage"><span>存储配置</span></el-menu-item>
         </el-sub-menu>
 
-        <el-sub-menu index="legacy">
-          <template #title><span>旧版入口</span></template>
-          <el-menu-item index="/legacy/overview"><span>旧版总览</span></el-menu-item>
-          <el-menu-item index="/dashboard/overview"><span>工作台总览</span></el-menu-item>
-        </el-sub-menu>
       </el-menu>
 
       <div class="role-switcher">

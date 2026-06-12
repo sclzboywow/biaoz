@@ -13,7 +13,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app import models
@@ -135,6 +135,43 @@ def _similarity(left: str | None, right: str | None) -> int:
     return int(SequenceMatcher(None, (left or "").strip(), (right or "").strip()).ratio() * 100)
 
 
+def _ocr_download_target_sql_clause():
+    """SQL 粗筛：资源可能具备 openstd hcno 或 sacinfo portal 下载入口。"""
+    return or_(
+        models.StandardResource.summary.ilike("%hcno=%"),
+        models.StandardResource.detail_url.ilike("%hcno=%"),
+        models.StandardResource.pdf_trial_url.ilike("%hcno=%"),
+        models.StandardResource.detail_url.ilike("%/portal/online/%"),
+        models.StandardResource.pdf_trial_url.ilike("%/portal/online/%"),
+        models.StandardResource.detail_url.ilike("%openstd.samr.gov.cn%"),
+        models.StandardResource.pdf_trial_url.ilike("%openstd.samr.gov.cn%"),
+    )
+
+
+ANNOUNCEMENT_RESOURCE_TYPES = (
+    "标准公告",
+    "征求意见",
+    "废止目录",
+    "标准计划",
+    "政策通知",
+    "工业和信息化标准增强",
+)
+
+
+def _ocr_eligible_resource_sql_clause():
+    return and_(
+        models.StandardResource.auto_decision.in_((DECISION_AUTO_CONFIRMED, DECISION_AUTO_MERGED)),
+        models.StandardResource.confidence_score.is_not(None),
+        models.StandardResource.confidence_score >= 85,
+        or_(models.StandardResource.risk_level.is_(None), models.StandardResource.risk_level != "high"),
+        or_(
+            models.StandardResource.resource_type.is_(None),
+            models.StandardResource.resource_type.notin_(ANNOUNCEMENT_RESOURCE_TYPES),
+        ),
+        _ocr_download_target_sql_clause(),
+    )
+
+
 def resolve_download_target(resource: models.StandardResource) -> dict | None:
     portal_pk = extract_portal_pk(resource.pdf_trial_url, resource.detail_url, resource.source_book_id)
     portal_base = extract_portal_base_url(resource.pdf_trial_url, resource.detail_url)
@@ -209,7 +246,7 @@ def create_ocr_task_from_decision(db: Session, decision_id: int, *, dry_run: boo
         )
     ).first()
     if existing:
-        return existing
+        return None
 
     trusted = db.get(models.TrustedSource, resource.source_id)
     ok, reason = _resource_eligible_for_ocr(resource, trusted)
@@ -287,11 +324,14 @@ def create_ocr_tasks_from_decisions(
     query = (
         select(models.GovernanceDecision, models.StandardResource)
         .join(models.StandardResource, models.StandardResource.id == models.GovernanceDecision.target_id)
+        .join(models.TrustedSource, models.TrustedSource.id == models.StandardResource.source_id)
         .where(
             models.GovernanceDecision.target_type == "standard_resource",
             models.GovernanceDecision.decision.in_((DECISION_AUTO_CONFIRMED, DECISION_AUTO_MERGED)),
+            models.TrustedSource.trust_level.in_(("A", "A+")),
+            _ocr_eligible_resource_sql_clause(),
         )
-        .order_by(models.GovernanceDecision.id.asc())
+        .order_by(models.GovernanceDecision.decided_at.desc(), models.GovernanceDecision.id.desc())
     )
     if source_id is not None:
         query = query.where(models.StandardResource.source_id == source_id)
@@ -302,7 +342,8 @@ def create_ocr_tasks_from_decisions(
         )
         query = query.where(models.StandardResource.id.notin_(subq))
 
-    rows = db.execute(query.limit(max(1, min(limit, 5000)))).all()
+    scan_limit = max(1, min(limit, 5000))
+    rows = db.execute(query.limit(scan_limit)).all()
     created = 0
     skipped = 0
     for decision, _resource in rows:
@@ -315,7 +356,13 @@ def create_ocr_tasks_from_decisions(
         db.commit()
     else:
         db.rollback()
-    return {"created": created, "skipped": skipped, "dry_run": dry_run, "scanned": len(rows)}
+    return {
+        "created": created,
+        "skipped": skipped,
+        "dry_run": dry_run,
+        "scanned": len(rows),
+        "scan_order": "recent_first",
+    }
 
 
 def _host_running_count(db: Session, host: str | None) -> int:
@@ -332,6 +379,7 @@ def _host_running_count(db: Session, host: str | None) -> int:
 
 
 def _source_hourly_count(db: Session, source_id: int | None) -> int:
+    """Count download attempts for a source in the last hour (not task creations)."""
     if not source_id:
         return 0
     since = datetime.now(UTC) - timedelta(hours=1)
@@ -341,17 +389,77 @@ def _source_hourly_count(db: Session, source_id: int | None) -> int:
             .select_from(models.OcrDownloadTask)
             .where(
                 models.OcrDownloadTask.source_id == source_id,
-                models.OcrDownloadTask.created_at >= since,
+                models.OcrDownloadTask.started_at.is_not(None),
+                models.OcrDownloadTask.started_at >= since,
             )
         )
         or 0
     )
 
 
+def release_stale_ocr_tasks(db: Session) -> int:
+    """Re-queue or fail OCR tasks stuck in RUNNING after worker crash/timeout."""
+    stale_seconds = max(60, get_int_setting(db, "ocr_task_stale_seconds", default=900))
+    cutoff = datetime.now(UTC) - timedelta(seconds=stale_seconds)
+    stale_tasks = list(
+        db.scalars(
+            select(models.OcrDownloadTask).where(
+                models.OcrDownloadTask.status == TASK_RUNNING,
+                models.OcrDownloadTask.locked_at.is_not(None),
+                models.OcrDownloadTask.locked_at < cutoff,
+            )
+        )
+    )
+    if not stale_tasks:
+        return 0
+
+    released = 0
+    for task in stale_tasks:
+        task.attempt_count += 1
+        stale_note = f"任务超时释放（>{stale_seconds}s，worker={task.locked_by or '-'}）"
+        task.last_error = f"{task.last_error}; {stale_note}" if task.last_error else stale_note
+        if task.attempt_count >= task.max_attempts:
+            task.status = TASK_NEED_MANUAL
+            task.finished_at = datetime.now(UTC)
+            result = "need_manual"
+        else:
+            task.status = TASK_PENDING
+            task.next_retry_at = datetime.now(UTC)
+            result = "pending"
+        task.locked_by = None
+        task.locked_at = None
+        write_process_audit_log(
+            db,
+            step_name="release_stale_ocr_task",
+            target_type="ocr_download_task",
+            target_id=task.id,
+            source_id=task.source_id,
+            result=result,
+            output_summary=stale_note,
+        )
+        released += 1
+    db.commit()
+    return released
+
+
+def _ocr_host_limit_reached(db: Session, host: str | None, host_limit: int) -> bool:
+    if host_limit <= 0 or not host:
+        return False
+    return _host_running_count(db, host) >= host_limit
+
+
+def _ocr_source_hourly_limit_reached(db: Session, source_id: int | None, source_hourly_limit: int) -> bool:
+    if source_hourly_limit <= 0 or not source_id:
+        return False
+    return _source_hourly_count(db, source_id) >= source_hourly_limit
+
+
 def claim_next_ocr_task(db: Session, worker_id: str) -> models.OcrDownloadTask | None:
-    host_limit = get_int_setting(db, "ocr_host_concurrency", default=2)
-    source_hourly_limit = get_int_setting(db, "ocr_source_hourly_limit", default=20)
+    release_stale_ocr_tasks(db)
+    host_limit = get_int_setting(db, "ocr_host_concurrency", default=0)
+    source_hourly_limit = get_int_setting(db, "ocr_source_hourly_limit", default=0)
     now = datetime.now(UTC)
+    scan_limit = 500 if host_limit > 0 or source_hourly_limit > 0 else 100
 
     candidates = db.scalars(
         select(models.OcrDownloadTask)
@@ -360,13 +468,13 @@ def claim_next_ocr_task(db: Session, worker_id: str) -> models.OcrDownloadTask |
             or_(models.OcrDownloadTask.next_retry_at.is_(None), models.OcrDownloadTask.next_retry_at <= now),
         )
         .order_by(models.OcrDownloadTask.priority.desc(), models.OcrDownloadTask.id.asc())
-        .limit(20)
+        .limit(scan_limit)
     ).all()
 
     for task in candidates:
-        if _host_running_count(db, task.host) >= host_limit:
+        if _ocr_host_limit_reached(db, task.host, host_limit):
             continue
-        if _source_hourly_count(db, task.source_id) >= source_hourly_limit:
+        if _ocr_source_hourly_limit_reached(db, task.source_id, source_hourly_limit):
             continue
         task.status = TASK_RUNNING
         task.locked_by = worker_id
@@ -792,8 +900,10 @@ def run_ocr_download_task(db: Session, task_id: int, *, storage_root: Path | Non
         db.commit()
         return {"ok": False, "status": task.status, "message": str(exc)}
     finally:
-        task.locked_by = None
-        task.locked_at = None
+        if task.locked_by or task.locked_at:
+            task.locked_by = None
+            task.locked_at = None
+            db.commit()
 
 
 def retry_ocr_task(db: Session, task_id: int) -> models.OcrDownloadTask:

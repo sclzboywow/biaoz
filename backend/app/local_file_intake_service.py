@@ -17,7 +17,13 @@ from app import models
 from app.config import get_settings
 from app.download_service import doc_type
 from app.settings_store import get_bool_setting
-from app.standard_number import canonicalize_standard_no_text, extract_standard_no_from_text, normalize_standard_no
+from app.standard_number import (
+    canonicalize_standard_no_text,
+    extract_standard_no_from_text,
+    normalize_atlas_code,
+    normalize_standard_no,
+    standard_no_token_match,
+)
 from app.status_calibration import calibrate_resource_status, link_archived_document_to_resources
 from app.storage import (
     check_storage_root,
@@ -61,8 +67,19 @@ class ExtractedMetadata:
     mime_type: str | None = None
 
 
+def _normalize_title_for_match(value: str | None) -> str:
+    text = (value or "").strip()
+    text = re.sub(r"\(\d+(?:\.\d+)?\s*[Mm][Bb]\)", "", text)
+    text = re.sub(r"\(\d+(?:\.\d+)?\s*[Kk][Gg]\)", "", text)
+    text = re.sub(r"^[\s\-_+]+|[\s\-_+]+$", "", text)
+    text = re.sub(r"[\s\-_]{2,}", " ", text).strip()
+    return text
+
+
 def _similarity(left: str | None, right: str | None) -> int:
-    return int(SequenceMatcher(None, left or "", right or "").ratio() * 100)
+    return int(
+        SequenceMatcher(None, _normalize_title_for_match(left), _normalize_title_for_match(right)).ratio() * 100
+    )
 
 
 def _append_log(db: Session, task_id: int, step_name: str, result: str, message: str | None = None, detail: dict | None = None) -> None:
@@ -108,14 +125,21 @@ def _strip_standard_no_from_title(stem: str, standard_no: str | None) -> str:
             if tail:
                 fragments.add(f"{head}-{tail}")
                 fragments.add(f"{head} {tail}")
+    atlas = normalize_atlas_code(standard_no)
+    if atlas:
+        fragments.add(atlas)
+        fragments.add(atlas.replace("-", ""))
+        if "-" in atlas:
+            fragments.add(atlas.replace("-", " "))
     recanon = extract_standard_no_from_text(canonicalize_standard_no_text(stem))
     if recanon:
         fragments.add(recanon)
     for fragment in sorted(fragments, key=len, reverse=True):
         if fragment:
             title = re.sub(re.escape(fragment), "", title, count=1, flags=re.I)
-    title = re.sub(r"^[\s\-_]+|[\s\-_]+$", "", title)
-    title = re.sub(r"[\s\-_]{2,}", " ", title).strip()
+    title = re.sub(r"^[\s\-_+]+|[\s\-_+]+$", "", title)
+    title = re.sub(r"[\s\-_+]{2,}", " ", title).strip()
+    title = _normalize_title_for_match(title)
     return title or stem
 
 
@@ -244,6 +268,8 @@ def match_existing_documents(db: Session, task: models.LocalFileIntakeTask) -> l
             models.Document.normalized_standard_no == normalized,
             models.Document.standard_no == number,
             func.upper(models.Document.standard_no) == number.upper(),
+            models.Document.standard_no.ilike(f"%{number}%"),
+            models.Document.normalized_standard_no.ilike(f"%{number}%"),
         ]
         for document in db.scalars(
             select(models.Document)
@@ -253,9 +279,23 @@ def match_existing_documents(db: Session, task: models.LocalFileIntakeTask) -> l
         ):
             if document.id in seen_document_ids:
                 continue
+            if not standard_no_token_match(document.standard_no, number) and not standard_no_token_match(
+                document.normalized_standard_no, number
+            ):
+                continue
             seen_document_ids.add(document.id)
+            exact_no_match = bool(
+                document.standard_no
+                and number
+                and standard_no_token_match(document.standard_no, number)
+            )
             title_score = _similarity(task.extracted_title, document.title)
+            if exact_no_match and title_score < 80:
+                title_score = max(title_score, 88)
             advice = "link_existing" if title_score >= 60 else "need_review"
+            match_score = max(85, title_score) if title_score >= 80 else max(70, title_score)
+            if exact_no_match and match_score < 85:
+                match_score = 85
             candidates.append(
                 models.LocalFileRecognitionCandidate(
                     task_id=task.id,
@@ -268,7 +308,7 @@ def match_existing_documents(db: Session, task: models.LocalFileIntakeTask) -> l
                     source_status=document.valid_status,
                     publish_date=document.publish_date,
                     effective_date=document.effective_date,
-                    match_score=max(85, title_score) if title_score >= 80 else max(70, title_score),
+                    match_score=match_score,
                     match_reason=f"标准编号一致（{number}），标题相似度 {title_score}%",
                     decision_advice=advice,
                 )

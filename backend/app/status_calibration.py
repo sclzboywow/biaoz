@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from difflib import SequenceMatcher
 
-from sqlalchemy import or_, select
+from sqlalchemy import desc, or_, select
 from sqlalchemy.orm import Session
 
 from app import models
@@ -169,17 +169,33 @@ def calibrate_resource_status(db: Session, resource: models.StandardResource) ->
             + (f"，详情页 {resource.detail_url}" if resource.detail_url else "")
         )
 
-        db.add(
-            models.SourceStatusSyncLog(
-                standard_resource_id=resource.id,
-                document_id=document.id,
-                old_status=old_status,
-                new_status=suggested_status,
-                sync_action=sync_action,
-                sync_reason=sync_reason,
-            )
+        latest_sync_log = db.scalars(
+            select(models.SourceStatusSyncLog)
+            .where(models.SourceStatusSyncLog.standard_resource_id == resource.id)
+            .where(models.SourceStatusSyncLog.document_id == document.id)
+            .order_by(desc(models.SourceStatusSyncLog.id))
+            .limit(1)
+        ).first()
+        status_changed = old_status != suggested_status
+        duplicate_latest_log = (
+            latest_sync_log is not None
+            and latest_sync_log.old_status == old_status
+            and latest_sync_log.new_status == suggested_status
+            and latest_sync_log.sync_action == sync_action
+            and latest_sync_log.sync_reason == sync_reason
         )
-        created_logs += 1
+        if status_changed and not duplicate_latest_log:
+            db.add(
+                models.SourceStatusSyncLog(
+                    standard_resource_id=resource.id,
+                    document_id=document.id,
+                    old_status=old_status,
+                    new_status=suggested_status,
+                    sync_action=sync_action,
+                    sync_reason=sync_reason,
+                )
+            )
+            created_logs += 1
 
         evidence_exists = db.scalars(
             select(models.StandardEvidence).where(

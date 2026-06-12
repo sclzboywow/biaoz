@@ -3,10 +3,11 @@ from __future__ import annotations
 import re
 
 from app.standard_number import (
-    ATLAS_CODE_PATTERN,
-    DRAWING_CODE_PATTERN,
+    ATLAS_CODE_PATTERNS,
     canonicalize_standard_no_text,
+    extract_all_codes_from_text,
     extract_standard_no_from_text,
+    normalize_atlas_code,
     normalize_standard_no,
 )
 from app.storage import safe_stem, safe_upload_filename
@@ -113,11 +114,10 @@ def build_intake_search_queries(
 
     code_tokens: list[str] = []
     for text in [safe_name, stem, extracted_title or ""]:
-        for pattern in (DRAWING_CODE_PATTERN, ATLAS_CODE_PATTERN):
-            for match in pattern.finditer(text):
-                code = match.group(0).upper()
-                if code not in code_tokens:
-                    code_tokens.append(code)
+        for code in extract_all_codes_from_text(text):
+            normalized = normalize_atlas_code(code) or code.upper()
+            if normalized not in code_tokens:
+                code_tokens.append(normalized)
 
     clean_title = _strip_known_codes(extracted_title or stem, code_tokens)
     if clean_title:
@@ -169,11 +169,10 @@ def collect_intake_match_numbers(
     for text in [stem, safe_name, original_file_name, extracted_title]:
         if not text:
             continue
-        standard_no = extract_standard_no_from_text(text)
-        if not standard_no:
-            continue
-        add(standard_no)
-        add(normalize_standard_no(standard_no).normalized)
+        for standard_no in extract_all_codes_from_text(text):
+            add(standard_no)
+            add(normalize_standard_no(standard_no).normalized)
+            add(normalize_atlas_code(standard_no))
 
     for query in build_intake_search_queries(
         original_file_name=original_file_name,

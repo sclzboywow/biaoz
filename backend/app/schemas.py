@@ -412,6 +412,30 @@ class SourceCategoryPage(BaseModel):
     has_more: bool = False
 
 
+class WpsStandardQueryRecordOut(OrmModel):
+    id: int
+    wps_record_id: str
+    serial_no: int | None = None
+    file_no: str | None = None
+    file_name: str | None = None
+    impl_status: str | None = None
+    link_url: str | None = None
+    goto_url: str | None = None
+    fields_json: str
+    wps_fetched_at: datetime | None = None
+    source_sheet: str
+    governance_status: str = "pending"
+    created_at: datetime
+    updated_at: datetime | None = None
+
+
+class WpsStandardQueryRecordPage(BaseModel):
+    total: int
+    items: list[WpsStandardQueryRecordOut]
+    next_cursor: int | None = None
+    has_more: bool = False
+
+
 class CategoryDiscoveryResult(BaseModel):
     discovered: int
     created: int
@@ -460,6 +484,28 @@ class StandardResourceOut(OrmModel):
 class StandardResourcePage(BaseModel):
     total: int
     items: list[StandardResourceOut]
+    next_cursor: int | None = None
+    has_more: bool = False
+
+
+class CertificationRecordOut(OrmModel):
+    id: int
+    source_id: int
+    source_item_id: str
+    record_type: str | None = None
+    org_name: str | None = None
+    certificate_no: str | None = None
+    standard_refs: str | None = None
+    status: str | None = None
+    issue_date: date | None = None
+    expire_date: date | None = None
+    detail_url: str | None = None
+    last_synced_at: datetime | None = None
+
+
+class CertificationRecordPage(BaseModel):
+    total: int
+    items: list[CertificationRecordOut]
     next_cursor: int | None = None
     has_more: bool = False
 
@@ -543,7 +589,10 @@ class SourceStatusSyncLogPage(BaseModel):
 class StandardEvidenceOut(OrmModel):
     id: int
     standard_resource_id: int | None = None
+    standard_no: str | None = None
+    standard_name: str | None = None
     document_id: int | None = None
+    document_title: str | None = None
     source_name: str | None = None
     source_level: str | None = None
     source_url: str | None = None
@@ -555,10 +604,19 @@ class StandardEvidenceOut(OrmModel):
     evidence_note: str | None = None
 
 
+class StandardEvidencePage(BaseModel):
+    total: int
+    items: list[StandardEvidenceOut]
+    next_cursor: int | None = None
+    has_more: bool = False
+
+
 class StandardRelationOut(OrmModel):
     id: int
     current_standard_resource_id: int | None = None
+    current_standard_name: str | None = None
     related_standard_resource_id: int | None = None
+    related_standard_name: str | None = None
     current_standard_no: str | None = None
     related_standard_no: str | None = None
     relation_type: str
@@ -566,6 +624,13 @@ class StandardRelationOut(OrmModel):
     source_url: str | None = None
     discovered_at: datetime
     is_manual_confirmed: bool
+
+
+class StandardRelationPage(BaseModel):
+    total: int
+    items: list[StandardRelationOut]
+    next_cursor: int | None = None
+    has_more: bool = False
 
 
 class StandardRelationUpdate(BaseModel):

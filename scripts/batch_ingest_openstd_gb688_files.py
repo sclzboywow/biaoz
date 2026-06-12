@@ -33,7 +33,10 @@ from app.gb688_captcha_download import (
     extract_hcno,
 )
 from app.samr_std_sync import _download_url
-from app.governance_automation import standard_resource_ingest_eligibility_clause
+from app.governance_automation import (
+    is_standard_resource_eligible_for_ingest,
+    standard_resource_ingest_eligibility_clause,
+)
 from app.settings_store import ensure_default_settings
 from app.storage import check_storage_root, configured_storage_root
 
@@ -163,6 +166,44 @@ def select_candidates(
         return candidates
 
 
+def select_candidates_by_ids(
+    *,
+    resource_ids: list[int],
+    force: bool = False,
+) -> list[Candidate]:
+    if not resource_ids:
+        return []
+    with SessionLocal() as db:
+        resources = list(
+            db.scalars(
+                select(models.StandardResource)
+                .where(models.StandardResource.id.in_(resource_ids))
+                .order_by(models.StandardResource.id)
+            ).all()
+        )
+        candidates: list[Candidate] = []
+        for resource in resources:
+            if not force and not is_standard_resource_eligible_for_ingest(resource):
+                continue
+            hcno = _resource_hcno(resource)
+            if not hcno:
+                continue
+            download_url = _download_url(hcno)
+            if not force and _has_archived_file(db, download_url):
+                continue
+            standard_no = (resource.standard_no or "").strip() or hcno
+            candidates.append(
+                Candidate(
+                    resource_id=resource.id,
+                    standard_no=standard_no,
+                    standard_name=resource.standard_name,
+                    hcno=hcno,
+                    download_url=download_url,
+                )
+            )
+        return candidates
+
+
 def _create_or_get_url_source(db, url: str, resource: models.StandardResource) -> models.UrlSource:
     source = db.query(models.UrlSource).filter(models.UrlSource.url == url).first()
     if source:
@@ -233,17 +274,22 @@ def main() -> int:
     parser.add_argument("--max-attempts", type=int, default=int(os.getenv("GB688_CAPTCHA_MAX_ATTEMPTS", "3")))
     parser.add_argument("--failure-cooldown-hours", type=float, default=2.0)
     parser.add_argument("--max-consecutive-errors", type=int, default=5)
+    parser.add_argument("--only-resource-ids", type=str, help="逗号分隔的 standard_resource id，用于决策后优先采集")
     add_baidu_upload_args(parser)
     args = parser.parse_args()
 
     source_id = args.source_id or openstd_source_id()
-    candidates = select_candidates(
-        source_id=source_id,
-        limit=max(args.limit, 1),
-        force=args.force,
-        start_after_resource_id=args.start_after_resource_id,
-        failure_cooldown_hours=args.failure_cooldown_hours,
-    )
+    if args.only_resource_ids:
+        only_ids = [int(item.strip()) for item in args.only_resource_ids.split(",") if item.strip().isdigit()]
+        candidates = select_candidates_by_ids(resource_ids=only_ids, force=args.force)
+    else:
+        candidates = select_candidates(
+            source_id=source_id,
+            limit=max(args.limit, 1),
+            force=args.force,
+            start_after_resource_id=args.start_after_resource_id,
+            failure_cooldown_hours=args.failure_cooldown_hours,
+        )
     print("openstd_batch_candidates " + json.dumps([item.__dict__ for item in candidates], ensure_ascii=False), flush=True)
     if args.dry_run or not candidates:
         return 0
@@ -279,9 +325,8 @@ def main() -> int:
                 )
             except Gb688DownloadUnavailableError as exc:
                 error_count += 1
-                consecutive_errors += 1
                 last_resource_id = item.resource_id
-                _mark_status(item.resource_id, TEMP_FAILURE_STATUS if "gb688.cn" in repr(exc) else PERMANENT_UNAVAILABLE_STATUS)
+                _mark_status(item.resource_id, PERMANENT_UNAVAILABLE_STATUS)
                 print(
                     "openstd_batch_result "
                     + json.dumps(
@@ -337,7 +382,11 @@ def main() -> int:
                     flush=True,
                 )
 
-            if args.max_consecutive_errors > 0 and consecutive_errors >= args.max_consecutive_errors:
+            if (
+                args.max_consecutive_errors > 0
+                and consecutive_errors >= args.max_consecutive_errors
+                and not args.only_resource_ids
+            ):
                 print(
                     "openstd_batch_summary "
                     + json.dumps(

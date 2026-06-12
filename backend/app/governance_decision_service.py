@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+import os
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -25,6 +26,7 @@ from app.governance_decision_engine import (
 
 PROCESS_TYPE = "GOVERNANCE_DECISION"
 SYSTEM_DECIDER = "governance-engine"
+PROCESS_AUDIT_OK_MIN_INTERVAL_HOURS = float(os.getenv("PROCESS_AUDIT_OK_MIN_INTERVAL_HOURS", "24"))
 
 
 def log_governance_decision_audit(
@@ -41,6 +43,20 @@ def log_governance_decision_audit(
     error_message: str | None = None,
     status: str = "ok",
 ) -> models.ProcessAuditLog:
+    if status == "ok" and PROCESS_AUDIT_OK_MIN_INTERVAL_HOURS > 0:
+        cutoff = datetime.now(UTC) - timedelta(hours=PROCESS_AUDIT_OK_MIN_INTERVAL_HOURS)
+        recent_same_audit = db.scalars(
+            select(models.ProcessAuditLog.id)
+            .where(models.ProcessAuditLog.process_name == "governance_decision")
+            .where(models.ProcessAuditLog.action == step_name)
+            .where(models.ProcessAuditLog.target_type == target_type)
+            .where(models.ProcessAuditLog.target_id == target_id)
+            .where(models.ProcessAuditLog.status == status)
+            .where(models.ProcessAuditLog.created_at >= cutoff)
+            .limit(1)
+        ).first()
+        if recent_same_audit is not None:
+            return db.get(models.ProcessAuditLog, recent_same_audit)
     row = models.ProcessAuditLog(
         process_name="governance_decision",
         process_type=PROCESS_TYPE,

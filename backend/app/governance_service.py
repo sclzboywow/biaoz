@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 from collections import Counter
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -27,6 +28,9 @@ from app.source_governance import (
 from app.url_source_profiler import profile_url as legacy_profile_url
 
 
+PROCESS_AUDIT_OK_MIN_INTERVAL_HOURS = float(os.getenv("PROCESS_AUDIT_OK_MIN_INTERVAL_HOURS", "24"))
+
+
 def log_process_audit(
     db: Session,
     *,
@@ -38,6 +42,20 @@ def log_process_audit(
     message: str | None = None,
     detail: dict | None = None,
 ) -> models.ProcessAuditLog:
+    if status == "ok" and target_type and target_id is not None and PROCESS_AUDIT_OK_MIN_INTERVAL_HOURS > 0:
+        cutoff = datetime.now(UTC) - timedelta(hours=PROCESS_AUDIT_OK_MIN_INTERVAL_HOURS)
+        recent_same_audit = db.scalars(
+            select(models.ProcessAuditLog.id)
+            .where(models.ProcessAuditLog.process_name == process_name)
+            .where(models.ProcessAuditLog.action == action)
+            .where(models.ProcessAuditLog.target_type == target_type)
+            .where(models.ProcessAuditLog.target_id == target_id)
+            .where(models.ProcessAuditLog.status == status)
+            .where(models.ProcessAuditLog.created_at >= cutoff)
+            .limit(1)
+        ).first()
+        if recent_same_audit is not None:
+            return db.get(models.ProcessAuditLog, recent_same_audit)
     row = models.ProcessAuditLog(
         process_name=process_name,
         action=action,

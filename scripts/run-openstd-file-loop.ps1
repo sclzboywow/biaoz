@@ -20,6 +20,7 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $cursorFile = Join-Path $logDir "openstd-file-loop.cursor"
 $pidFile = Join-Path $logDir "openstd-file-loop.pid"
 . (Join-Path $PSScriptRoot "loop-pid-utils.ps1")
+. (Join-Path $PSScriptRoot "loop-log-utils.ps1")
 Write-LoopPidFile -Path $pidFile -ProcessId $PID
 
 function Write-OpenstdLog {
@@ -73,7 +74,7 @@ do {
         --max-attempts $MaxAttempts `
         --defer-baidu-upload `
         @cursorArg 2>&1
-    $output | ForEach-Object { Write-Output $_ }
+    Write-CompactLoopOutput -OutputLines $output
     Update-OpenstdCursorFromOutput -OutputLines $output
     Write-OpenstdLog "files finish exit=$LASTEXITCODE"
 

@@ -8,7 +8,7 @@ from sqlalchemy import desc, or_, select
 from sqlalchemy.orm import Session
 
 from app import models
-from app.standard_number import normalize_standard_no
+from app.standard_number import normalize_standard_no, standard_no_token_match
 from app.trusted_source_adapters import TrustedSourceSearchQuery, TrustedSourceSearchResult
 
 logger = logging.getLogger(__name__)
@@ -26,8 +26,9 @@ def _resource_to_search_result(
     title_score = _similarity(query.standard_name, resource.standard_name)
     resource_no = resource.normalized_standard_no or normalize_standard_no(resource.standard_no).normalized
     number_match = bool(
-        (query.normalized_standard_no and query.normalized_standard_no == resource_no)
-        or (query.standard_no and query.standard_no == resource.standard_no)
+        (query.normalized_standard_no and standard_no_token_match(resource_no, query.normalized_standard_no))
+        or (query.standard_no and standard_no_token_match(resource.standard_no, query.standard_no))
+        or (query.standard_no and standard_no_token_match(resource.normalized_standard_no, query.standard_no))
     )
     if number_match and title_score >= 80:
         score = 95
@@ -72,9 +73,13 @@ def search_standard_resources_index(
     """Search synced standard_resources rows as the phase-1 local trusted-source index."""
     filters = []
     if query.normalized_standard_no:
-        filters.append(models.StandardResource.normalized_standard_no == query.normalized_standard_no)
+        token = query.normalized_standard_no.strip()
+        filters.append(models.StandardResource.normalized_standard_no == token)
+        filters.append(models.StandardResource.normalized_standard_no.ilike(f"%{token}%"))
     if query.standard_no:
-        filters.append(models.StandardResource.standard_no == query.standard_no)
+        token = query.standard_no.strip()
+        filters.append(models.StandardResource.standard_no == token)
+        filters.append(models.StandardResource.standard_no.ilike(f"%{token}%"))
     if not filters and query.standard_name:
         filters.append(models.StandardResource.standard_name.ilike(f"%{query.standard_name[:40]}%"))
     if not filters and query.keywords:
@@ -83,8 +88,8 @@ def search_standard_resources_index(
             if not keyword:
                 continue
             if re.fullmatch(r"[A-Z0-9./-]{3,}", keyword, flags=re.I):
-                filters.append(models.StandardResource.standard_no.ilike(keyword))
-                filters.append(models.StandardResource.normalized_standard_no.ilike(keyword))
+                filters.append(models.StandardResource.standard_no.ilike(f"%{keyword}%"))
+                filters.append(models.StandardResource.normalized_standard_no.ilike(f"%{keyword}%"))
             else:
                 filters.append(models.StandardResource.standard_name.ilike(f"%{keyword[:40]}%"))
     if not filters:

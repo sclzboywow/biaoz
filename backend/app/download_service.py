@@ -5,7 +5,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -25,6 +25,7 @@ from app.settings_store import get_setting
 
 DEFAULT_DOWNLOAD_TIMEOUT_SECONDS = 30
 DEFAULT_DOWNLOAD_RETRIES = int(os.getenv("DOWNLOAD_RETRIES", "3"))
+CHECK_LOG_SUCCESS_MIN_INTERVAL_HOURS = float(os.getenv("CHECK_LOG_SUCCESS_MIN_INTERVAL_HOURS", "24"))
 
 
 @dataclass
@@ -164,18 +165,35 @@ def log_check(
     result: str,
     message: str,
 ) -> None:
+    now = datetime.now(UTC)
+    change_detected = result in {models.ChangeType.created.value, models.ChangeType.updated.value}
+    low_value_success = not change_detected and status_code is not None and status_code < 400
+    if low_value_success and CHECK_LOG_SUCCESS_MIN_INTERVAL_HOURS > 0:
+        cutoff = now - timedelta(hours=CHECK_LOG_SUCCESS_MIN_INTERVAL_HOURS)
+        recent_same_result = db.scalars(
+            select(models.CheckLog.id)
+            .where(models.CheckLog.url_source_id == source.id)
+            .where(models.CheckLog.result == result)
+            .where(models.CheckLog.status_code == status_code)
+            .where(models.CheckLog.error_message.is_(None))
+            .where(models.CheckLog.created_at >= cutoff)
+            .limit(1)
+        ).first()
+        if recent_same_result is not None:
+            source.last_checked_at = now
+            return
     db.add(
         models.CheckLog(
             url_source_id=source.id,
-            check_time=datetime.now(UTC),
+            check_time=now,
             status_code=status_code,
             result=result,
-            change_detected=result in {models.ChangeType.created.value, models.ChangeType.updated.value},
+            change_detected=change_detected,
             error_message=message if result == "失败" else None,
             message=message,
         )
     )
-    source.last_checked_at = datetime.now(UTC)
+    source.last_checked_at = now
 
 
 def resolve_source_failure_alerts(db: Session, source: models.UrlSource) -> None:

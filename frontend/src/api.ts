@@ -619,6 +619,23 @@ export type SourceCategory = {
   last_seen_book_ids_hash?: string
 }
 
+export type RawRecord = {
+  id: number
+  wps_record_id: string
+  serial_no?: number | null
+  file_no?: string | null
+  file_name?: string | null
+  impl_status?: string | null
+  link_url?: string | null
+  goto_url?: string | null
+  fields_json: string
+  wps_fetched_at?: string | null
+  source_sheet: string
+  governance_status: string
+  created_at: string
+  updated_at?: string | null
+}
+
 export type StandardResource = {
   id: number
   standard_no?: string
@@ -714,7 +731,10 @@ export type SourceStatusSyncLog = {
 export type StandardEvidence = {
   id: number
   standard_resource_id?: number
+  standard_no?: string | null
+  standard_name?: string | null
   document_id?: number
+  document_title?: string | null
   source_name?: string
   source_level?: string
   source_url?: string
@@ -729,7 +749,9 @@ export type StandardEvidence = {
 export type StandardRelation = {
   id: number
   current_standard_resource_id?: number
+  current_standard_name?: string | null
   related_standard_resource_id?: number
+  related_standard_name?: string | null
   current_standard_no?: string
   related_standard_no?: string
   relation_type: string
