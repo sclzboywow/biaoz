@@ -1,6 +1,6 @@
 # Production Data Layer
 
-- Production requires PostgreSQL. SQLite is blocked by default in application startup.
+- All environments use PostgreSQL. Non-PostgreSQL `DATABASE_URL` values are rejected at startup.
 - Database schema and indexes are managed by Alembic. Run `alembic upgrade head` before starting the API.
 - Docker startup runs `alembic upgrade head` automatically before `uvicorn`.
 - Large list APIs use cursor/keyset pagination through `next_cursor` and `has_more`.

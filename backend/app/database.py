@@ -11,13 +11,11 @@ class Base(DeclarativeBase):
 
 
 settings = get_settings()
-if settings.database_url.startswith("sqlite") and not settings.allow_sqlite:
+if not settings.database_url.startswith(("postgresql://", "postgresql+psycopg://")):
     raise RuntimeError(
-        "SQLite is disabled. Configure DATABASE_URL with a PostgreSQL DSN, "
+        "DATABASE_URL must be PostgreSQL, "
         "for example postgresql+psycopg://user:password@host:5432/biaoz."
     )
-if not settings.database_url.startswith(("postgresql://", "postgresql+psycopg://")) and not settings.allow_sqlite:
-    raise RuntimeError("Production database must be PostgreSQL. Set ALLOW_SQLITE=true only for isolated tests.")
 
 engine = create_engine(settings.database_url, pool_pre_ping=True)
 

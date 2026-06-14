@@ -38,7 +38,7 @@ V1.0 只解决标准规范电子文件的自动采集、归档、版本维护、
 | 层级 | 技术 |
 | --- | --- |
 | 自动化流程 | n8n |
-| 数据库 | PostgreSQL；本地开发可用 SQLite |
+| 数据库 | PostgreSQL |
 | 后端 | Python FastAPI |
 | 前端 | Vue 3 + Element Plus |
 | 文件存储 | 本地磁盘，后期可切 MinIO |

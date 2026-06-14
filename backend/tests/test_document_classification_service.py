@@ -37,10 +37,10 @@ def test_infer_standard_level_atlas(db):
     assert infer_standard_level("03G101-1", None) == "标准图集"
 
 
-def test_classify_gb50300_auto(db):
+def test_classify_gb50300_auto(db, no_index_matches):
     result = classify_document_file(
         db,
-        file_name="GB_T_50300-2013 建筑工程施工质量验收统一标准.pdf",
+        file_name="GB_T_99998-2099 建筑工程施工质量验收统一标准.pdf",
     )
     assert result.standard_prefix == "GB/T"
     assert result.standard_level == "国家标准"
@@ -49,8 +49,8 @@ def test_classify_gb50300_auto(db):
     assert result.decision in {"auto_confirm", "auto_classify", "quarantine"}
 
 
-def test_classify_jgj59(db):
-    result = classify_document_file(db, file_name="JGJ 59-2011 建筑施工安全检查标准.pdf")
+def test_classify_jgj59(db, no_index_matches):
+    result = classify_document_file(db, file_name="JGJ 99997-2099 建筑施工安全检查标准.pdf")
     assert result.standard_prefix == "JGJ"
     assert result.standard_level == "行业标准"
     assert result.category in {"工程建设", "安全生产"}
@@ -98,24 +98,50 @@ def test_map_source_status_abolished(db):
     assert valid == "来源确认废止"
 
 
-def test_resource_abolished_status_on_classify(db):
+def test_resource_abolished_status_on_classify(db, monkeypatch):
     source = models.TrustedSource(source_name="测试源", base_url="https://example.com", trust_level="A", trust_score=100)
     db.add(source)
     db.flush()
     resource = models.StandardResource(
         source_id=source.id,
-        standard_no="GB/T 50300-2013",
-        normalized_standard_no="GB/T 50300-2013",
+        standard_no="GB/T 99996-2099",
+        normalized_standard_no="GB/T 99996-2099",
         standard_prefix="GB/T",
         standard_name="建筑工程施工质量验收统一标准",
         source_status="废止",
     )
     db.add(resource)
-    db.commit()
+    db.flush()
+
+    from app.document_classification_service import ClassificationCandidate
+
+    def fake_match(_db, *, numbers, title, allow_external_search):
+        return [
+            ClassificationCandidate(
+                candidate_type="standard_resource",
+                candidate_id=resource.id,
+                source_id=source.id,
+                source_name=source.source_name,
+                standard_no=resource.standard_no,
+                normalized_standard_no=resource.normalized_standard_no,
+                standard_name=resource.standard_name,
+                source_status=resource.source_status,
+                match_score=95,
+            )
+        ]
+
+    monkeypatch.setattr(
+        "app.document_classification_service.match_standard_resources_for_classification",
+        fake_match,
+    )
+    monkeypatch.setattr(
+        "app.document_classification_service.match_existing_documents_for_classification",
+        lambda *args, **kwargs: [],
+    )
 
     result = classify_document_file(
         db,
-        file_name="GB_T_50300-2013 建筑工程施工质量验收统一标准.pdf",
+        file_name="GB_T_99996-2099 建筑工程施工质量验收统一标准.pdf",
     )
     assert result.valid_status == "来源确认废止"
     assert result.system_status == "来源确认废止"
