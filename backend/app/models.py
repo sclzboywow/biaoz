@@ -113,6 +113,12 @@ class Document(TimestampMixin, Base):
     review_remark: Mapped[str | None] = mapped_column(Text)
     summary: Mapped[str | None] = mapped_column(Text)
     keywords: Mapped[str | None] = mapped_column(Text)
+    classification_decision: Mapped[str | None] = mapped_column(String(40), index=True)
+    classification_confidence_score: Mapped[int | None] = mapped_column(Integer, index=True)
+    classification_risk_level: Mapped[str | None] = mapped_column(String(20), index=True)
+    classification_reason: Mapped[str | None] = mapped_column(Text)
+    matched_resource_id: Mapped[int | None] = mapped_column(ForeignKey("standard_resources.id"), index=True)
+    standard_level: Mapped[str | None] = mapped_column(String(40), index=True)
 
     versions: Mapped[list["DocumentVersion"]] = relationship(back_populates="document")
     project_links: Mapped[list["ProjectDocument"]] = relationship(back_populates="document")

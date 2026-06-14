@@ -31,6 +31,9 @@ const documentQuery = reactive({
   manual_status: '',
   valid_status: '',
   review_status: '',
+  metadata_status: '',
+  classification_decision: '',
+  classification_risk_level: '',
   doc_type: '',
 })
 const documentPager = createCursorPager()
@@ -88,12 +91,46 @@ onMounted(loadDocuments)
           <el-option label="待复核" value="待复核" />
         </el-select>
       </el-form-item>
-      <el-form-item label="人工复核">
-        <el-select v-model="documentQuery.manual_status" clearable style="width: 140px">
-          <el-option label="确认现行" value="确认现行" />
-          <el-option label="确认废止" value="确认废止" />
-          <el-option label="仅供参考" value="仅供参考" />
-          <el-option label="暂不处理" value="暂不处理" />
+      <el-form-item label="复核状态">
+        <el-select v-model="documentQuery.review_status" clearable style="width: 140px">
+          <el-option label="自动确认" value="自动确认" />
+          <el-option label="自动分类" value="自动分类" />
+          <el-option label="风险隔离" value="风险隔离" />
+          <el-option label="冲突拦截" value="冲突拦截" />
+          <el-option label="待复核" value="待复核" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="有效状态">
+        <el-select v-model="documentQuery.valid_status" clearable style="width: 150px">
+          <el-option label="来源确认现行" value="来源确认现行" />
+          <el-option label="来源确认废止" value="来源确认废止" />
+          <el-option label="疑似被替代" value="疑似被替代" />
+          <el-option label="系统推定未知" value="系统推定未知" />
+          <el-option label="隔离留存" value="隔离留存" />
+          <el-option label="冲突拦截" value="冲突拦截" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="元数据状态">
+        <el-select v-model="documentQuery.metadata_status" clearable style="width: 150px">
+          <el-option label="系统自动确认" value="系统自动确认" />
+          <el-option label="系统自动分类" value="系统自动分类" />
+          <el-option label="系统隔离" value="系统隔离" />
+          <el-option label="系统冲突拦截" value="系统冲突拦截" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="自动决策">
+        <el-select v-model="documentQuery.classification_decision" clearable style="width: 140px">
+          <el-option label="自动确认" value="auto_confirm" />
+          <el-option label="自动分类" value="auto_classify" />
+          <el-option label="风险隔离" value="quarantine" />
+          <el-option label="冲突拦截" value="conflict_block" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="风险等级">
+        <el-select v-model="documentQuery.classification_risk_level" clearable style="width: 110px">
+          <el-option label="低" value="low" />
+          <el-option label="中" value="medium" />
+          <el-option label="高" value="high" />
         </el-select>
       </el-form-item>
       <el-form-item><el-button :icon="Search" @click="resetDocuments">查询</el-button></el-form-item>
@@ -103,6 +140,11 @@ onMounted(loadDocuments)
       <el-table-column prop="standard_no" label="标准编号" width="150" />
       <el-table-column prop="doc_type" label="类型" width="90" />
       <el-table-column prop="category" label="分类" width="130" />
+      <el-table-column prop="standard_level" label="标准层级" width="110" />
+      <el-table-column prop="classification_confidence_score" label="置信度" width="90" />
+      <el-table-column prop="classification_risk_level" label="风险" width="80" />
+      <el-table-column prop="classification_decision" label="自动决策" width="110" />
+      <el-table-column prop="classification_reason" label="分类依据" min-width="180" show-overflow-tooltip />
       <el-table-column prop="source_status" label="来源状态" width="120" :formatter="sourceStatusFormatter" />
       <el-table-column prop="system_status" label="系统判断" width="140" :formatter="systemStatusFormatter" show-overflow-tooltip />
       <el-table-column prop="manual_status" label="人工复核" width="120" :formatter="manualStatusFormatter" />

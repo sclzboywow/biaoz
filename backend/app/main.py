@@ -560,9 +560,15 @@ def page_documents(
     source_status: str | None = None,
     system_status: str | None = None,
     manual_status: str | None = None,
+    metadata_status: str | None = None,
+    classification_decision: str | None = None,
+    classification_risk_level: str | None = None,
     doc_type: str | None = None,
+    exclude_quarantine: bool = False,
     db: Session = Depends(get_db),
 ):
+    from app.settings_store import get_bool_setting
+
     page_size = min(max(page_size, 1), 200)
     statement = select(models.Document)
     count_statement = select(func.count(models.Document.id))
@@ -576,6 +582,7 @@ def page_documents(
                 models.Document.normalized_standard_no.like(keyword),
                 models.Document.category.like(keyword),
                 models.Document.issuing_authority.like(keyword),
+                models.Document.classification_reason.like(keyword),
             )
         )
     if valid_status:
@@ -588,8 +595,17 @@ def page_documents(
         filters.append(models.Document.system_status == system_status)
     if manual_status:
         filters.append(models.Document.manual_status == manual_status)
+    if metadata_status:
+        filters.append(models.Document.metadata_status == metadata_status)
+    if classification_decision:
+        filters.append(models.Document.classification_decision == classification_decision)
+    if classification_risk_level:
+        filters.append(models.Document.classification_risk_level == classification_risk_level)
     if doc_type:
         filters.append(models.Document.doc_type == doc_type)
+    if exclude_quarantine or not get_bool_setting(db, "quarantine_visible_in_library", default=True):
+        filters.append(models.Document.review_status != "风险隔离")
+        filters.append(models.Document.valid_status != "隔离留存")
     for item in filters:
         statement = statement.where(item)
         count_statement = count_statement.where(item)

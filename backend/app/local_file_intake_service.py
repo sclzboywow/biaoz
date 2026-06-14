@@ -35,6 +35,13 @@ from app.storage import (
     sha256_file,
 )
 from app.intake_search_slices import build_intake_search_queries, collect_intake_match_numbers
+from app.classification_decisions import DECISION_AUTO_CLASSIFY, DECISION_AUTO_CONFIRM, DECISION_DUPLICATE_EXISTING
+from app.document_classification_service import (
+    apply_classification_to_document_fields,
+    classify_document_file,
+    map_to_legacy_intake_decision,
+    record_classification_evidence,
+)
 from app.trusted_source_adapters import TrustedSourceSearchQuery
 from app.trusted_source_search_service import search_trusted_sources, search_trusted_sources_sliced
 
@@ -698,8 +705,33 @@ def analyze_local_file(db: Session, task_id: int) -> models.LocalFileIntakeTask:
             )
 
         decision, confidence, risk, reason = _apply_decision_from_candidates(db, task, candidates)
+
+        classification = classify_document_file(
+            db,
+            file_name=task.original_file_name,
+            file_hash=task.file_hash,
+            allow_external_search=get_bool_setting(db, "auto_external_search_enabled", default=False),
+        )
+        task.decision = map_to_legacy_intake_decision(classification.decision)
+        task.confidence_score = classification.confidence_score
+        task.risk_level = classification.risk_level
+        task.decision_reason = classification.decision_reason or reason
+        _append_log(
+            db,
+            task.id,
+            "classification",
+            "ok",
+            task.decision_reason,
+            {
+                "decision": classification.decision,
+                "legacy_decision": task.decision,
+                "confidence": classification.confidence_score,
+                "risk": classification.risk_level,
+            },
+        )
+
         task.recognition_status = "completed"
-        _append_log(db, task.id, "decision", "ok", reason, {"decision": decision, "confidence": confidence, "risk": risk})
+        _append_log(db, task.id, "decision", "ok", task.decision_reason, {"decision": task.decision, "confidence": task.confidence_score, "risk": task.risk_level})
         if auto_external_added or auto_external_errors:
             _append_log(
                 db,
@@ -708,13 +740,33 @@ def analyze_local_file(db: Session, task_id: int) -> models.LocalFileIntakeTask:
                 "ok",
                 reason,
                 {
-                    "decision": decision,
-                    "confidence": confidence,
-                    "risk": risk,
+                    "decision": task.decision,
+                    "confidence": task.confidence_score,
+                    "risk": task.risk_level,
                     "added": auto_external_added,
                     "auto": True,
                 },
             )
+        if get_bool_setting(db, "auto_intake_enabled", default=False) and get_bool_setting(db, "ingest_enabled", default=False):
+            if classification.decision in {DECISION_AUTO_CONFIRM, DECISION_AUTO_CLASSIFY}:
+                db.commit()
+                db.refresh(task)
+                confirm_intake_decision(
+                    db,
+                    task.id,
+                    action="link_existing" if classification.matched_document_id else "create_document",
+                    document_id=classification.matched_document_id,
+                    reviewed_by="system:auto",
+                    remark=classification.decision_reason,
+                )
+                refreshed = db.get(models.LocalFileIntakeTask, task.id)
+                return refreshed or task
+            if classification.decision == DECISION_DUPLICATE_EXISTING:
+                db.commit()
+                db.refresh(task)
+                confirm_intake_decision(db, task.id, action="ignore", reviewed_by="system:auto", remark=classification.decision_reason)
+                refreshed = db.get(models.LocalFileIntakeTask, task.id)
+                return refreshed or task
         db.commit()
         db.refresh(task)
         return task
@@ -864,11 +916,27 @@ def confirm_intake_decision(
     _, storage_path = _archive_task_file(db, task, source)
 
     if action == "create_document":
-        document = models.Document()
-        _apply_standard_fields(document, task, candidate=candidate)
+        classification = classify_document_file(
+            db,
+            file_name=task.original_file_name,
+            file_hash=task.file_hash,
+            allow_external_search=False,
+        )
+        doc_fields = apply_classification_to_document_fields(classification)
+        document = models.Document(
+            **{k: v for k, v in doc_fields.items() if k != "matched_resource_id"},
+            doc_type=task.file_type or doc_type(task.original_file_name, task.mime_type),
+        )
         db.add(document)
         db.flush()
         document_id = document.id
+        record_classification_evidence(
+            db,
+            document=document,
+            classification=classification,
+            file_hash=task.file_hash,
+            resource_id=classification.matched_resource_id,
+        )
     elif action in {"link_existing", "new_version"}:
         if not document_id:
             raise ValueError("关联已有文件或新增版本时必须指定 document_id")

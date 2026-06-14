@@ -18,6 +18,12 @@ from app.alerts import create_operational_alert
 from app.governance_automation import auto_resolve_ingest_success_alerts
 from app.governance_service import log_process_audit
 from app.baidu_pan_storage import BaiduPanClient, BaiduPanError, append_baidu_pan_sync_remark, build_baidu_pan_sync_payload, load_baidu_pan_config
+from app.classification_decisions import DECISION_DUPLICATE_EXISTING
+from app.document_classification_service import (
+    apply_classification_to_document_fields,
+    classify_document_file,
+    record_classification_evidence,
+)
 from app.standard_number import normalize_standard_no
 from app.storage import check_storage_root, relative_storage_path
 from app.settings_store import get_setting
@@ -311,6 +317,43 @@ def archive_downloaded_content(
     file_hash = sha256_bytes(downloaded.content)
     file_name = guess_file_name(downloaded.url, downloaded.content_type, downloaded.content_disposition)
 
+    classification = classify_document_file(
+        db,
+        file_name=file_name,
+        file_hash=file_hash,
+        source=source,
+        content_type=downloaded.content_type,
+        source_name=source.source_name,
+        source_category=source.category,
+        allow_external_search=False,
+    )
+
+    if classification.decision == DECISION_DUPLICATE_EXISTING and classification.matched_version_id:
+        version = db.get(models.DocumentVersion, classification.matched_version_id)
+        if version:
+            message = classification.decision_reason or "内容无变化"
+            record_classification_evidence(
+                db,
+                document=version.document,
+                classification=classification,
+                source=source,
+                file_hash=file_hash,
+            )
+            log_check(db, source, downloaded.status_code, "无变化", message)
+            db.commit()
+            return schemas.UrlCheckResult(
+                source_id=source.id,
+                url=source.url,
+                ok=True,
+                status_code=downloaded.status_code,
+                result="无变化",
+                message=message,
+                document_id=version.document_id,
+                version_id=version.id,
+                file_hash=file_hash,
+                change_type=models.ChangeType.unchanged.value,
+            )
+
     linked_resource: models.StandardResource | None = None
     resource_id = extract_standard_resource_id_from_remark(source.remark)
     if resource_id:
@@ -420,34 +463,38 @@ def archive_downloaded_content(
             change_type=models.ChangeType.unchanged.value,
         )
 
+    document: models.Document | None = None
+    doc_fields = apply_classification_to_document_fields(classification)
+
     if latest:
         document = latest.document
         latest.is_current = False
         change_type = models.ChangeType.updated.value
         alert_type = "文件更新"
         message = f"发现新版本：{file_name}"
-    else:
-        standard_no = extract_standard_no(source)
-        number_parts = normalize_standard_no(standard_no)
+    elif classification.matched_document_id:
+        document = db.get(models.Document, classification.matched_document_id)
+        if document is not None:
+            change_type = models.ChangeType.updated.value
+            alert_type = "文件更新"
+            message = f"关联已有标准新版本：{file_name}"
+
+    if document is None:
         document = models.Document(
-            title=source.source_name or Path(file_name).stem or source.url,
-            standard_no=standard_no,
-            raw_standard_no=number_parts.raw,
-            normalized_standard_no=number_parts.normalized,
-            standard_prefix=number_parts.prefix,
-            standard_main_no=number_parts.main_no,
-            standard_year=number_parts.year,
-            standard_revision_note=number_parts.revision_note,
+            **{k: v for k, v in doc_fields.items() if k != "matched_resource_id"},
             doc_type=doc_type(file_name, downloaded.content_type),
-            category=source.category,
-            valid_status=models.ValidStatus.pending.value,
-            review_status=models.ReviewStatus.pending.value,
         )
         db.add(document)
         db.flush()
         change_type = models.ChangeType.created.value
         alert_type = "新增文件"
         message = f"首次归档：{file_name}"
+    else:
+        for key, value in doc_fields.items():
+            if key == "matched_resource_id":
+                continue
+            if value is not None:
+                setattr(document, key, value)
 
     relative_path = archive_relative_path(source.id, file_name)
     storage_path = ""
@@ -497,21 +544,21 @@ def archive_downloaded_content(
     db.add(version)
     db.flush()
     document.current_version_id = version.id
-    db.add(
-        models.StandardEvidence(
-            document_id=document.id,
-            source_name=source.source_name or source.source_unit or "URL来源",
-            source_level="file",
-            source_url=source.url,
-            raw_status_text=change_type,
-            parsed_status=change_type,
-            page_summary=f"{file_name} size={len(downloaded.content)} sha256={file_hash}",
-            page_html_hash=file_hash,
-            evidence_note=f"文件采集归档：{message}",
-        )
+    record_classification_evidence(
+        db,
+        document=document,
+        classification=classification,
+        source=source,
+        file_hash=file_hash,
+        resource_id=classification.matched_resource_id,
     )
 
-    alert_level = models.AlertLevel.high.value if change_type == models.ChangeType.updated.value else models.AlertLevel.medium.value
+    if classification.risk_level == "high" or classification.decision == "conflict_block":
+        alert_level = models.AlertLevel.high.value
+    elif classification.decision == "quarantine":
+        alert_level = models.AlertLevel.medium.value
+    else:
+        alert_level = models.AlertLevel.high.value if change_type == models.ChangeType.updated.value else models.AlertLevel.medium.value
     alert = create_alert(db, source, alert_type, message, alert_level, document.id)
     log_check(db, source, downloaded.status_code, change_type, message)
     from app.status_calibration import link_archived_document_to_resources

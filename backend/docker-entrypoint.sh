@@ -3,7 +3,7 @@ set -e
 cd /app
 
 VERSION="$(alembic current 2>/dev/null | grep -oE '202[0-9]+_[0-9]+' | tail -1 || true)"
-HEAD="20260611_0008"
+HEAD="20260614_0011"
 
 if [ "$VERSION" = "$HEAD" ]; then
   echo "Alembic already at head ($HEAD)"

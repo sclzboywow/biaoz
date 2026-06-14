@@ -69,6 +69,11 @@ export type DocumentItem = {
   valid_status: string
   review_status: string
   metadata_status?: string
+  classification_decision?: string | null
+  classification_confidence_score?: number | null
+  classification_risk_level?: string | null
+  classification_reason?: string | null
+  standard_level?: string | null
   current_version_id?: number
   review_remark?: string
 }

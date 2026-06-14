@@ -368,6 +368,7 @@ def canonicalize_standard_no_text(text: str) -> str:
     value = _prefix_tq_slash(value, kind="Q")
     value = re.sub(r"(?i)\bISO[\s\-_]*(\d)", r"ISO \1", value)
     value = re.sub(r"(?i)\bIEC[\s\-_]*(\d)", r"IEC \1", value)
+    value = re.sub(r"(?<=[A-Z/])\s*_+(?=\d)", " ", value)
     return canonicalize_atlas_code_text(value)
 
 

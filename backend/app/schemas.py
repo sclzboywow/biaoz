@@ -79,6 +79,12 @@ class DocumentBase(BaseModel):
     review_remark: str | None = None
     summary: str | None = None
     keywords: str | None = None
+    classification_decision: str | None = None
+    classification_confidence_score: int | None = None
+    classification_risk_level: str | None = None
+    classification_reason: str | None = None
+    matched_resource_id: int | None = None
+    standard_level: str | None = None
 
 
 class DocumentCreate(DocumentBase):
@@ -110,6 +116,12 @@ class DocumentUpdate(BaseModel):
     review_remark: str | None = None
     summary: str | None = None
     keywords: str | None = None
+    classification_decision: str | None = None
+    classification_confidence_score: int | None = None
+    classification_risk_level: str | None = None
+    classification_reason: str | None = None
+    matched_resource_id: int | None = None
+    standard_level: str | None = None
 
 
 class DocumentOut(DocumentBase, OrmModel):

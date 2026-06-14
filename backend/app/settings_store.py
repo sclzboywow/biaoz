@@ -186,6 +186,60 @@ DEFAULT_SETTINGS: dict[str, dict[str, str]] = {
         "label": "第二批可信源正式文件流水线",
         "description": "开启后第二批标准正文源在 file_ready 且通过 admission 校验后可进入 Document/DocumentVersion；公告类材料始终仅作线索/证据。",
     },
+    "auto_classification_enabled": {
+        "value": "true",
+        "value_type": "bool",
+        "label": "启用文件自动分类",
+        "description": "开启后 URL 下载与本地上传使用统一置信度分级与自动决策。",
+    },
+    "auto_confirm_threshold": {
+        "value": "90",
+        "value_type": "int",
+        "label": "自动确认置信阈值",
+        "description": "置信分数达到该值时自动确认入库。",
+    },
+    "auto_classify_threshold": {
+        "value": "70",
+        "value_type": "int",
+        "label": "自动分类置信阈值",
+        "description": "置信分数达到该值时自动分类入库。",
+    },
+    "quarantine_threshold": {
+        "value": "40",
+        "value_type": "int",
+        "label": "隔离留存置信阈值",
+        "description": "低于自动分类阈值且不低于该值时进入风险隔离。",
+    },
+    "auto_external_search_enabled": {
+        "value": "false",
+        "value_type": "bool",
+        "label": "分类时启用外网搜索",
+        "description": "开启后本地无高置信匹配时可调用可信源外网搜索；默认关闭以避免批量任务慢/失败。",
+    },
+    "auto_intake_enabled": {
+        "value": "false",
+        "value_type": "bool",
+        "label": "本地上传自动确认入库",
+        "description": "开启后本地上传在 auto_confirm/auto_classify 决策时可跳过人工确认。",
+    },
+    "quarantine_visible_in_library": {
+        "value": "true",
+        "value_type": "bool",
+        "label": "文件库显示隔离文件",
+        "description": "关闭后文件库默认列表可隐藏风险隔离条目。",
+    },
+    "project_binding_exclude_quarantine": {
+        "value": "true",
+        "value_type": "bool",
+        "label": "项目绑定排除隔离文件",
+        "description": "项目依据绑定默认排除风险隔离文件。",
+    },
+    "project_binding_exclude_conflict": {
+        "value": "true",
+        "value_type": "bool",
+        "label": "项目绑定排除冲突文件",
+        "description": "项目依据绑定默认排除冲突拦截文件。",
+    },
 }
 
 
@@ -470,3 +524,11 @@ def get_int_setting(db: Session, key: str, default: int) -> int:
         return int(value)
     except ValueError:
         return default
+
+
+def get_classification_thresholds(db: Session) -> dict[str, int]:
+    return {
+        "confirm": get_int_setting(db, "auto_confirm_threshold", 90),
+        "classify": get_int_setting(db, "auto_classify_threshold", 70),
+        "quarantine": get_int_setting(db, "quarantine_threshold", 40),
+    }

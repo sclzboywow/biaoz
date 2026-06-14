@@ -9,3 +9,4 @@ socksio==1.0.0
 beautifulsoup4==4.12.3
 ddddocr==1.5.6
 alembic==1.14.0
+pytest==8.3.4
