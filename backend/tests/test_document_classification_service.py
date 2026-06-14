@@ -20,6 +20,7 @@ from app.document_classification_service import (
     infer_standard_level,
     is_isolated_classification_decision,
     map_source_status,
+    resolve_document_display_title,
 )
 
 
@@ -224,3 +225,43 @@ def test_bind_document_rejects_quarantine(db):
     db.flush()
     with pytest.raises(ValueError, match="不可绑定"):
         bind_document_to_project(db, project_id=project.id, document_id=doc.id)
+
+
+def test_resolve_spc_display_title_short():
+    title = resolve_document_display_title(
+        preferred_source_name="GB/T 4996-2025 平托盘 试验方法",
+        file_title="GB/T 4996 2025",
+        extracted_file_title=(
+            "GB/T 4996 2025.pdf GB/T 4996 2025 平托盘 试验方法 SPC在线阅读授权文件 "
+            "standard no= ; standard resource id=557466; detail url=https://www.spc.org.cn/online/foo"
+        ),
+        standard_no="GB/T 4996-2025",
+    )
+    assert title == "GB/T 4996-2025 平托盘 试验方法"
+
+
+def test_classify_spc_source_uses_short_title(db, monkeypatch):
+    source = models.UrlSource(
+        url="spc-online-reading://GB/T 88881-2099",
+        source_name="GB/T 88881-2099 柴油润滑性评定用高频往复试验机",
+        category="SPC在线阅读授权文件",
+        remark="standard_no=GB/T 88881-2099; standard_resource_id=557447; detail_url=https://www.spc.org.cn/online/demo",
+    )
+    monkeypatch.setattr(
+        "app.document_classification_service.search_trusted_sources_sliced",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        "app.document_classification_service.match_existing_documents_for_classification",
+        lambda *args, **kwargs: [],
+    )
+    result = classify_document_file(
+        db,
+        file_name="GB/T 88881-2099 柴油润滑性评定用高频往复试验机.pdf",
+        source=source,
+        source_name=source.source_name,
+        source_category=source.category,
+    )
+    assert result.title == "GB/T 88881-2099 柴油润滑性评定用高频往复试验机"
+    assert "standard resource id" not in result.title.lower()
+    assert "SPC在线阅读授权文件" not in result.title

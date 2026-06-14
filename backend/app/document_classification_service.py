@@ -139,6 +139,91 @@ def clean_file_title(file_name: str) -> tuple[str, str, str]:
     return safe_name, stem, title or stem
 
 
+_REMARK_NOISE_PATTERNS = (
+    re.compile(r"(?i)standard[_\s-]*no\s*=\s*[^;]+"),
+    re.compile(r"(?i)standard[_\s-]*resource[_\s-]*id\s*=\s*\d+"),
+    re.compile(r"(?i)detail[_\s-]*url\s*=\s*\S+"),
+    re.compile(r"采集方式\s*=\s*[^;]+"),
+    re.compile(r"https?://\S+"),
+)
+
+_TITLE_CATEGORY_NOISE = (
+    "SPC在线阅读授权文件",
+    "SPC会员在线阅读PDF流",
+)
+
+
+def _dedupe_texts(*values: str | None) -> list[str]:
+    seen: set[str] = set()
+    texts: list[str] = []
+    for value in values:
+        text = (value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        texts.append(text)
+    return texts
+
+
+def _strip_title_noise(text: str, *, strip_standard_no: bool = False, standard_no: str | None = None) -> str:
+    cleaned = text.strip()
+    for pattern in _REMARK_NOISE_PATTERNS:
+        cleaned = pattern.sub(" ", cleaned)
+    for label in _TITLE_CATEGORY_NOISE:
+        cleaned = cleaned.replace(label, " ")
+    cleaned = re.sub(r"\.pdf\b", " ", cleaned, flags=re.I)
+    if strip_standard_no and standard_no:
+        for token in _dedupe_texts(standard_no, normalize_standard_no(standard_no).normalized):
+            cleaned = re.sub(re.escape(token), " ", cleaned, flags=re.I)
+    cleaned = re.sub(r"[\s_－—]+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+    return cleaned
+
+
+def sanitize_document_title(
+    value: str | None,
+    *,
+    standard_no: str | None = None,
+    strip_standard_no: bool = False,
+) -> str | None:
+    if not value:
+        return None
+    cleaned = _strip_title_noise(value, strip_standard_no=strip_standard_no, standard_no=standard_no)
+    return cleaned or None
+
+
+def resolve_document_display_title(
+    *,
+    preferred_source_name: str | None,
+    file_title: str | None,
+    extracted_file_title: str | None,
+    standard_no: str | None,
+) -> str:
+    for candidate in (preferred_source_name, file_title, extracted_file_title):
+        cleaned = sanitize_document_title(candidate, standard_no=standard_no, strip_standard_no=candidate != preferred_source_name)
+        if cleaned and len(cleaned) >= 2:
+            return cleaned[:500]
+    fallback = sanitize_document_title(file_title or extracted_file_title or preferred_source_name, standard_no=standard_no, strip_standard_no=True)
+    return (fallback or "未命名文件")[:500]
+
+
+def _preferred_source_display_name(
+    source: models.UrlSource | None,
+    source_name: str | None,
+) -> str | None:
+    for candidate in (
+        source.source_name if source else None,
+        source_name,
+    ):
+        text = (candidate or "").strip()
+        if not text:
+            continue
+        if text.startswith(("http://", "https://", "spc-online-reading://", "local-intake://")):
+            continue
+        return text
+    return None
+
+
 def infer_standard_level(standard_no: str | None, standard_prefix: str | None) -> str:
     prefix = (standard_prefix or standard_no or "").upper().strip()
     if not prefix:
@@ -548,12 +633,23 @@ def classify_document_file(
 ) -> DocumentClassificationResult:
     thresholds = get_classification_thresholds(db)
 
-    safe_name, _stem, title = clean_file_title(file_name)
-    texts = [file_name, _stem, source_name, source_category]
+    safe_name, _stem, file_title = clean_file_title(file_name)
+    preferred_source_name = _preferred_source_display_name(source, source_name)
+    number_texts = _dedupe_texts(file_name, _stem, source_name, source_category)
     if source:
-        texts.extend([source.source_name, source.remark, source.url, source.category])
-    primary_no, all_codes, extracted_title = _extract_metadata_from_texts(*texts)
-    display_title = extracted_title or title or safe_name
+        number_texts.extend(_dedupe_texts(source.source_name, source.remark, source.url, source.category))
+    primary_no, all_codes, _ = _extract_metadata_from_texts(*number_texts)
+    _, _, extracted_file_title = _extract_metadata_from_texts(
+        file_name,
+        _stem,
+        preferred_source_name,
+    )
+    display_title = resolve_document_display_title(
+        preferred_source_name=preferred_source_name,
+        file_title=file_title,
+        extracted_file_title=extracted_file_title,
+        standard_no=primary_no or (all_codes[0] if all_codes else None),
+    )
 
     number_parts = normalize_standard_no(primary_no or (all_codes[0] if all_codes else None))
     if not number_parts.normalized and all_codes:
