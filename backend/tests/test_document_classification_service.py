@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app import models
-from app.classification_decisions import DECISION_CONFLICT_BLOCK, DECISION_DUPLICATE_EXISTING, DECISION_QUARANTINE
-from app.document_binding import is_document_project_bindable
+from app.classification_decisions import (
+    DECISION_CONFLICT_BLOCK,
+    DECISION_DUPLICATE_EXISTING,
+    DECISION_MANUAL_REVIEW,
+    DECISION_QUARANTINE,
+)
+from app.document_binding import bind_document_to_project, is_document_project_bindable
 from app.document_classification_service import (
     apply_decision_thresholds,
+    can_link_classification_to_existing_document,
     classify_document_file,
+    DocumentClassificationResult,
     infer_standard_level,
+    is_isolated_classification_decision,
     map_source_status,
 )
 
@@ -173,3 +183,44 @@ def test_document_binding_allows_auto_confirm(db):
         classification_decision="auto_confirm",
     )
     assert is_document_project_bindable(doc, db=db) is True
+
+
+def test_auto_classification_disabled_manual_review(db, monkeypatch):
+    monkeypatch.setattr(
+        "app.document_classification_service.get_bool_setting",
+        lambda _db, key, default=False: False if key == "auto_classification_enabled" else default,
+    )
+    result = classify_document_file(
+        db,
+        file_name="GB_T_99998-2099 建筑工程施工质量验收统一标准.pdf",
+    )
+    assert result.decision == DECISION_MANUAL_REVIEW
+    assert result.review_status == "待复核"
+    assert result.valid_status == "待确认"
+    assert result.classification_decision is None
+    assert result.matched_document_id is None
+
+
+def test_isolated_decision_blocks_existing_link():
+    result = DocumentClassificationResult(
+        title="隔离",
+        decision=DECISION_QUARANTINE,
+        matched_document_id=1,
+    )
+    assert is_isolated_classification_decision(result.decision) is True
+    assert can_link_classification_to_existing_document(result) is False
+
+
+def test_bind_document_rejects_quarantine(db):
+    project = models.Project(project_name="测试项目-隔离绑定")
+    doc = models.Document(
+        title="隔离",
+        valid_status="隔离留存",
+        review_status="风险隔离",
+        classification_decision="quarantine",
+    )
+    db.add(project)
+    db.add(doc)
+    db.flush()
+    with pytest.raises(ValueError, match="不可绑定"):
+        bind_document_to_project(db, project_id=project.id, document_id=doc.id)

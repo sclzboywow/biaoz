@@ -624,6 +624,28 @@ def create_document(payload: schemas.DocumentCreate, db: Session = Depends(get_d
     return item
 
 
+@api.post("/project-documents", response_model=schemas.ProjectDocumentOut)
+def bind_project_document(payload: schemas.ProjectDocumentCreate, db: Session = Depends(get_db)):
+    from app.document_binding import bind_document_to_project
+
+    try:
+        link = bind_document_to_project(
+            db,
+            project_id=payload.project_id,
+            document_id=payload.document_id,
+            usage_type=payload.usage_type,
+            importance=payload.importance,
+            confirmed_by=payload.confirmed_by,
+            confirmed_at=payload.confirmed_at,
+            remark=payload.remark,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.commit()
+    db.refresh(link)
+    return link
+
+
 @api.patch("/documents/{document_id}", response_model=schemas.DocumentOut)
 def update_document(document_id: int, payload: schemas.DocumentUpdate, db: Session = Depends(get_db)):
     item = crud.get_item(db, models.Document, document_id)

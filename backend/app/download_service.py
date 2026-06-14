@@ -21,7 +21,10 @@ from app.baidu_pan_storage import BaiduPanClient, BaiduPanError, append_baidu_pa
 from app.classification_decisions import DECISION_DUPLICATE_EXISTING
 from app.document_classification_service import (
     apply_classification_to_document_fields,
+    apply_fields_to_document,
+    can_link_classification_to_existing_document,
     classify_document_file,
+    is_isolated_classification_decision,
     record_classification_evidence,
 )
 from app.standard_number import normalize_standard_no
@@ -465,14 +468,15 @@ def archive_downloaded_content(
 
     document: models.Document | None = None
     doc_fields = apply_classification_to_document_fields(classification)
+    isolated = is_isolated_classification_decision(classification.decision)
 
-    if latest:
+    if not isolated and latest:
         document = latest.document
         latest.is_current = False
         change_type = models.ChangeType.updated.value
         alert_type = "文件更新"
         message = f"发现新版本：{file_name}"
-    elif classification.matched_document_id:
+    elif not isolated and can_link_classification_to_existing_document(classification):
         document = db.get(models.Document, classification.matched_document_id)
         if document is not None:
             change_type = models.ChangeType.updated.value
@@ -481,20 +485,20 @@ def archive_downloaded_content(
 
     if document is None:
         document = models.Document(
-            **{k: v for k, v in doc_fields.items() if k != "matched_resource_id"},
+            **doc_fields,
             doc_type=doc_type(file_name, downloaded.content_type),
         )
         db.add(document)
         db.flush()
         change_type = models.ChangeType.created.value
-        alert_type = "新增文件"
-        message = f"首次归档：{file_name}"
+        alert_type = "冲突隔离" if isolated else "新增文件"
+        message = (
+            f"隔离归档：{file_name}"
+            if isolated
+            else f"首次归档：{file_name}"
+        )
     else:
-        for key, value in doc_fields.items():
-            if key == "matched_resource_id":
-                continue
-            if value is not None:
-                setattr(document, key, value)
+        apply_fields_to_document(document, doc_fields)
 
     relative_path = archive_relative_path(source.id, file_name)
     storage_path = ""
@@ -563,7 +567,8 @@ def archive_downloaded_content(
     log_check(db, source, downloaded.status_code, change_type, message)
     from app.status_calibration import link_archived_document_to_resources
 
-    link_archived_document_to_resources(db, document=document, source=source)
+    if not isolated:
+        link_archived_document_to_resources(db, document=document, source=source)
     auto_resolve_ingest_success_alerts(
         db,
         document=document,

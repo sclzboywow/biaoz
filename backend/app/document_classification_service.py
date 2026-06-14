@@ -19,9 +19,11 @@ from app.classification_decisions import (
     DECISION_CONFLICT_BLOCK,
     DECISION_DUPLICATE_EXISTING,
     DECISION_LINK_EXISTING,
+    DECISION_MANUAL_REVIEW,
     DECISION_NEW_VERSION,
     DECISION_QUARANTINE,
     FORMAL_INGEST_DECISIONS,
+    ISOLATED_INGEST_DECISIONS,
     LEGACY_INTAKE_DECISION_MAP,
 )
 from app.intake_search_slices import NOISE_TOKENS, build_intake_search_queries, collect_intake_match_numbers
@@ -215,6 +217,45 @@ def apply_decision_thresholds(
     if score >= quarantine_threshold:
         return DECISION_QUARANTINE, RISK_MEDIUM
     return DECISION_CONFLICT_BLOCK, RISK_HIGH
+
+
+def is_auto_classification_enabled(db: Session) -> bool:
+    return get_bool_setting(db, "auto_classification_enabled", default=True)
+
+
+def is_isolated_classification_decision(decision: str | None) -> bool:
+    return decision in ISOLATED_INGEST_DECISIONS
+
+
+def can_link_classification_to_existing_document(result: DocumentClassificationResult) -> bool:
+    if is_isolated_classification_decision(result.decision):
+        return False
+    if result.decision == DECISION_MANUAL_REVIEW:
+        return False
+    if result.decision in FORMAL_INGEST_DECISIONS and result.matched_document_id:
+        return True
+    return False
+
+
+def apply_manual_review_classification(result: DocumentClassificationResult) -> None:
+    result.decision = DECISION_MANUAL_REVIEW
+    result.confidence_score = 0
+    result.risk_level = RISK_MEDIUM
+    result.decision_reason = "自动分类已关闭，待人工复核"
+    result.review_status = models.ReviewStatus.pending.value
+    result.valid_status = models.ValidStatus.pending.value
+    result.metadata_status = None
+    result.classification_decision = None
+    result.classification_confidence_score = None
+    result.classification_risk_level = None
+    result.classification_reason = None
+    result.matched_document_id = None
+
+
+def apply_fields_to_document(document: models.Document, fields: dict[str, Any]) -> None:
+    for key, value in fields.items():
+        if value is not None:
+            setattr(document, key, value)
 
 
 def infer_category_from_keywords(title: str | None) -> str | None:
@@ -506,8 +547,6 @@ def classify_document_file(
     allow_external_search: bool = False,
 ) -> DocumentClassificationResult:
     thresholds = get_classification_thresholds(db)
-    if not get_bool_setting(db, "auto_classification_enabled", default=True):
-        thresholds = {**thresholds, "enabled": False}
 
     safe_name, _stem, title = clean_file_title(file_name)
     texts = [file_name, _stem, source_name, source_category]
@@ -563,6 +602,12 @@ def classify_document_file(
         result.decision = DECISION_DUPLICATE_EXISTING
         result.decision_reason = top.match_reason or "文件 hash 与已有版本完全一致"
         _finalize_result_fields(db, result, source, source_category)
+        return result
+
+    if not is_auto_classification_enabled(db):
+        _finalize_result_fields(db, result, source, source_category)
+        apply_manual_review_classification(result)
+        result.evidence = build_classification_evidence(result)
         return result
 
     has_conflict = _detect_multi_standard_conflict(all_codes)

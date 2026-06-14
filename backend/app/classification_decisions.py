@@ -9,6 +9,14 @@ DECISION_LINK_EXISTING = "link_existing"
 DECISION_NEW_VERSION = "new_version"
 DECISION_QUARANTINE = "quarantine"
 DECISION_CONFLICT_BLOCK = "conflict_block"
+DECISION_MANUAL_REVIEW = "manual_review"
+
+ISOLATED_INGEST_DECISIONS = frozenset(
+    {
+        DECISION_QUARANTINE,
+        DECISION_CONFLICT_BLOCK,
+    }
+)
 
 FORMAL_INGEST_DECISIONS = frozenset(
     {
@@ -28,4 +36,5 @@ LEGACY_INTAKE_DECISION_MAP = {
     DECISION_NEW_VERSION: "link_existing",
     DECISION_QUARANTINE: "need_review",
     DECISION_CONFLICT_BLOCK: "need_review",
+    DECISION_MANUAL_REVIEW: "need_review",
 }

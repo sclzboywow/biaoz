@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
 from app import models
 from app.settings_store import get_bool_setting
 
@@ -57,3 +60,46 @@ def is_document_project_bindable(
         return True
 
     return False
+
+
+def bind_document_to_project(
+    db: Session,
+    *,
+    project_id: int,
+    document_id: int,
+    usage_type: str | None = None,
+    importance: str | None = None,
+    confirmed_by: str | None = None,
+    confirmed_at=None,
+    remark: str | None = None,
+) -> models.ProjectDocument:
+    project = db.get(models.Project, project_id)
+    if project is None:
+        raise ValueError("项目不存在")
+    document = db.get(models.Document, document_id)
+    if document is None:
+        raise ValueError("文件不存在")
+    if not is_document_project_bindable(document, db=db):
+        raise ValueError("该文件不可绑定到项目：隔离、冲突或废止状态默认排除")
+
+    existing = db.scalars(
+        select(models.ProjectDocument).where(
+            models.ProjectDocument.project_id == project_id,
+            models.ProjectDocument.document_id == document_id,
+        )
+    ).first()
+    if existing is not None:
+        raise ValueError("该项目已绑定此文件")
+
+    link = models.ProjectDocument(
+        project_id=project_id,
+        document_id=document_id,
+        usage_type=usage_type,
+        importance=importance,
+        confirmed_by=confirmed_by,
+        confirmed_at=confirmed_at,
+        remark=remark,
+    )
+    db.add(link)
+    db.flush()
+    return link

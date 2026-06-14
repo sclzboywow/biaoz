@@ -38,7 +38,10 @@ from app.intake_search_slices import build_intake_search_queries, collect_intake
 from app.classification_decisions import DECISION_AUTO_CLASSIFY, DECISION_AUTO_CONFIRM, DECISION_DUPLICATE_EXISTING
 from app.document_classification_service import (
     apply_classification_to_document_fields,
+    apply_fields_to_document,
+    can_link_classification_to_existing_document,
     classify_document_file,
+    is_isolated_classification_decision,
     map_to_legacy_intake_decision,
     record_classification_evidence,
 )
@@ -924,7 +927,7 @@ def confirm_intake_decision(
         )
         doc_fields = apply_classification_to_document_fields(classification)
         document = models.Document(
-            **{k: v for k, v in doc_fields.items() if k != "matched_resource_id"},
+            **doc_fields,
             doc_type=task.file_type or doc_type(task.original_file_name, task.mime_type),
         )
         db.add(document)
@@ -938,11 +941,29 @@ def confirm_intake_decision(
             resource_id=classification.matched_resource_id,
         )
     elif action in {"link_existing", "new_version"}:
+        classification = classify_document_file(
+            db,
+            file_name=task.original_file_name,
+            file_hash=task.file_hash,
+            allow_external_search=False,
+        )
+        if is_isolated_classification_decision(classification.decision):
+            raise ValueError("冲突/隔离文件不可关联已有正式标准，请改为新建入库或人工复核")
+        if can_link_classification_to_existing_document(classification):
+            document_id = document_id or classification.matched_document_id
         if not document_id:
             raise ValueError("关联已有文件或新增版本时必须指定 document_id")
         document = db.get(models.Document, document_id)
         if document is None:
             raise ValueError("指定的 Document 不存在")
+        apply_fields_to_document(document, apply_classification_to_document_fields(classification))
+        record_classification_evidence(
+            db,
+            document=document,
+            classification=classification,
+            file_hash=task.file_hash,
+            resource_id=classification.matched_resource_id,
+        )
     else:
         raise ValueError(f"不支持的处理动作：{action}")
 
