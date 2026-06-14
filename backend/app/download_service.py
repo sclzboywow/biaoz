@@ -279,7 +279,13 @@ def archive_downloaded_content(
     *,
     defer_baidu_upload: bool = False,
 ) -> schemas.UrlCheckResult:
+    from app.batch2_admission import (
+        evaluate_batch2_file_admission,
+        record_batch2_file_evidence_only,
+        should_block_batch2_formal_file_ingest,
+    )
     from app.settings_store import get_bool_setting
+    from app.status_calibration import extract_standard_resource_id_from_remark
 
     if not get_bool_setting(db, "ingest_enabled", default=False):
         return record_download_failure(
@@ -304,6 +310,61 @@ def archive_downloaded_content(
 
     file_hash = sha256_bytes(downloaded.content)
     file_name = guess_file_name(downloaded.url, downloaded.content_type, downloaded.content_disposition)
+
+    linked_resource: models.StandardResource | None = None
+    resource_id = extract_standard_resource_id_from_remark(source.remark)
+    if resource_id:
+        linked_resource = db.get(models.StandardResource, resource_id)
+    if linked_resource is not None:
+        blocked, block_reason = should_block_batch2_formal_file_ingest(db, resource=linked_resource)
+        if blocked:
+            record_batch2_file_evidence_only(
+                db,
+                resource=linked_resource,
+                url_source=source,
+                file_hash=file_hash,
+                summary=f"{file_name} size={len(downloaded.content)}",
+                reason=block_reason,
+            )
+            log_check(db, source, downloaded.status_code, "跳过", f"第二批源仅留证：{block_reason}")
+            db.commit()
+            return schemas.UrlCheckResult(
+                source_id=source.id,
+                url=source.url,
+                ok=True,
+                status_code=downloaded.status_code,
+                result="跳过",
+                message=f"第二批源文件仅留证，不入正式库：{block_reason}",
+                file_hash=file_hash,
+                change_type=models.ChangeType.unchanged.value,
+            )
+        admission = evaluate_batch2_file_admission(
+            db,
+            resource=linked_resource,
+            official_file_url=source.url,
+            file_name=file_name,
+        )
+        if admission.evidence_only:
+            record_batch2_file_evidence_only(
+                db,
+                resource=linked_resource,
+                url_source=source,
+                file_hash=file_hash,
+                summary=f"{file_name} size={len(downloaded.content)}",
+                reason=admission.reason,
+            )
+            log_check(db, source, downloaded.status_code, "跳过", f"第二批源仅留证：{admission.reason}")
+            db.commit()
+            return schemas.UrlCheckResult(
+                source_id=source.id,
+                url=source.url,
+                ok=True,
+                status_code=downloaded.status_code,
+                result="跳过",
+                message=f"第二批源文件仅留证，不入正式库：{admission.reason}",
+                file_hash=file_hash,
+                change_type=models.ChangeType.unchanged.value,
+            )
 
     latest = db.scalars(
         select(models.DocumentVersion)

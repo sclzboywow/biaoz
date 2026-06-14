@@ -18,6 +18,13 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.alerts import upsert_pending_alert
+from app.batch2_admission import (
+    FILE_INGEST_FILE_READY,
+    evaluate_batch2_file_admission,
+    record_batch2_file_evidence_only,
+    resolve_batch2_download_target,
+    should_block_batch2_formal_file_ingest,
+)
 from app.config import get_settings
 from app.download_service import (
     DownloadedContent,
@@ -168,11 +175,20 @@ def _ocr_eligible_resource_sql_clause():
             models.StandardResource.resource_type.is_(None),
             models.StandardResource.resource_type.notin_(ANNOUNCEMENT_RESOURCE_TYPES),
         ),
-        _ocr_download_target_sql_clause(),
+        or_(
+            _ocr_download_target_sql_clause(),
+            and_(
+                models.StandardResource.file_ingest_status == FILE_INGEST_FILE_READY,
+                models.StandardResource.official_file_url.isnot(None),
+            ),
+        ),
     )
 
 
 def resolve_download_target(resource: models.StandardResource) -> dict | None:
+    batch2_target = resolve_batch2_download_target(resource)
+    if batch2_target:
+        return batch2_target
     portal_pk = extract_portal_pk(resource.pdf_trial_url, resource.detail_url, resource.source_book_id)
     portal_base = extract_portal_base_url(resource.pdf_trial_url, resource.detail_url)
     if portal_pk and portal_base:
@@ -197,7 +213,14 @@ def resolve_download_target(resource: models.StandardResource) -> dict | None:
     return None
 
 
-def _resource_eligible_for_ocr(resource: models.StandardResource, trusted: models.TrustedSource | None) -> tuple[bool, str]:
+def _resource_eligible_for_ocr(
+    db: Session,
+    resource: models.StandardResource,
+    trusted: models.TrustedSource | None,
+) -> tuple[bool, str]:
+    blocked, reason = should_block_batch2_formal_file_ingest(db, resource=resource, trusted_source=trusted)
+    if blocked:
+        return False, reason
     if resource.auto_decision not in {DECISION_AUTO_CONFIRMED, DECISION_AUTO_MERGED}:
         return False, f"auto_decision={resource.auto_decision}"
     if (resource.confidence_score or 0) < 85:
@@ -249,7 +272,7 @@ def create_ocr_task_from_decision(db: Session, decision_id: int, *, dry_run: boo
         return None
 
     trusted = db.get(models.TrustedSource, resource.source_id)
-    ok, reason = _resource_eligible_for_ocr(resource, trusted)
+    ok, reason = _resource_eligible_for_ocr(db, resource, trusted)
     if not ok:
         write_process_audit_log(
             db,
@@ -518,9 +541,20 @@ def solve_captcha_by_ocr(image_bytes: bytes) -> str:
 
 
 def submit_captcha_and_download(task: models.OcrDownloadTask, db: Session) -> DownloadedContent:
+    from app.download_service import fetch_url
+
     resource = db.get(models.StandardResource, task.resource_id) if task.resource_id else None
     max_attempts = task.max_attempts or get_int_setting(db, "ocr_max_attempts", default=3)
     remaining = max(1, max_attempts - task.attempt_count)
+
+    if task.provider == "batch2_direct":
+        url_source = db.get(models.UrlSource, task.url_source_id) if task.url_source_id else None
+        if url_source is None and task.download_url and resource:
+            url_source = create_or_get_ocr_url_source(db, resource, task.download_url)
+            task.url_source_id = url_source.id
+        if url_source is None:
+            raise OpenstdDownloadUnavailableError("batch2_direct 缺少下载来源")
+        return fetch_url(url_source, timeout_seconds=120)
 
     if task.provider == "samr_portal" and resource:
         portal_pk = extract_portal_pk(resource.pdf_trial_url, resource.detail_url, resource.source_book_id)
@@ -621,8 +655,45 @@ def link_file_to_standard_resource(
     file_object: models.FileObject,
     url_source: models.UrlSource,
     original_file_name: str,
-) -> tuple[models.Document, models.DocumentVersion, str]:
+) -> tuple[models.Document | None, models.DocumentVersion | None, str]:
     resource = db.get(models.StandardResource, task.resource_id) if task.resource_id else None
+    trusted = db.get(models.TrustedSource, resource.source_id) if resource else None
+    blocked, block_reason = should_block_batch2_formal_file_ingest(db, resource=resource, trusted_source=trusted)
+    if blocked and resource is not None:
+        record_batch2_file_evidence_only(
+            db,
+            resource=resource,
+            url_source=url_source,
+            file_hash=file_object.file_hash,
+            summary=f"{original_file_name} size={file_object.file_size or 0}",
+            reason=block_reason,
+            trusted_source=trusted,
+        )
+        return None, None, "EVIDENCE_ONLY"
+
+    if resource is not None and trusted is not None:
+        admission = evaluate_batch2_file_admission(
+            db,
+            resource=resource,
+            trusted_source=trusted,
+            official_file_url=task.download_url or url_source.url,
+            file_name=original_file_name,
+            file_title=file_object.pdf_title,
+        )
+        if admission.evidence_only:
+            record_batch2_file_evidence_only(
+                db,
+                resource=resource,
+                url_source=url_source,
+                file_hash=file_object.file_hash,
+                summary=f"{original_file_name} size={file_object.file_size or 0}",
+                reason=admission.reason,
+                trusted_source=trusted,
+            )
+            return None, None, "EVIDENCE_ONLY"
+        if not admission.allowed:
+            return None, None, "NEED_REVIEW"
+
     document: models.Document | None = None
 
     if resource:
@@ -665,6 +736,38 @@ def link_file_to_standard_resource(
             document_id=document.id,
         )
         return document, None, "NEED_REVIEW"
+
+    if document is not None:
+        existing_same_hash = db.scalars(
+            select(models.DocumentVersion)
+            .where(
+                models.DocumentVersion.document_id == document.id,
+                models.DocumentVersion.file_hash == file_object.file_hash,
+            )
+            .order_by(models.DocumentVersion.is_current.desc(), models.DocumentVersion.id.desc())
+        ).first()
+        if existing_same_hash is not None:
+            preferred_path = file_object.local_path or file_object.storage_path or existing_same_hash.file_path
+            if (
+                preferred_path
+                and existing_same_hash.file_path != preferred_path
+                and existing_same_hash.file_path.startswith("url-sources/")
+                and preferred_path.startswith("objects/sha256/")
+            ):
+                existing_same_hash.file_path = preferred_path
+            if existing_same_hash.file_object_id is None:
+                existing_same_hash.file_object_id = file_object.id
+            if existing_same_hash.url_source_id is None:
+                existing_same_hash.url_source_id = url_source.id
+            db.query(models.DocumentVersion).filter(
+                models.DocumentVersion.document_id == document.id,
+                models.DocumentVersion.id != existing_same_hash.id,
+            ).update({"is_current": False}, synchronize_session=False)
+            existing_same_hash.is_current = True
+            document.current_version_id = existing_same_hash.id
+            if resource:
+                match_resource_to_documents(db, resource)
+            return document, existing_same_hash, "unchanged"
 
     if document is None:
         number_parts = normalize_standard_no(task.standard_no or resource.standard_no if resource else None)
@@ -838,6 +941,23 @@ def run_ocr_download_task(db: Session, task_id: int, *, storage_root: Path | Non
             task.finished_at = datetime.now(UTC)
             db.commit()
             return {"ok": False, "status": task.status, "message": "名称相似度过低，转人工"}
+        if link_status == "EVIDENCE_ONLY":
+            task.status = TASK_SKIPPED
+            task.finished_at = datetime.now(UTC)
+            task.last_error = "第二批源文件仅留证，不入正式库"
+            db.commit()
+            return {"ok": True, "status": task.status, "file_object_id": file_object.id, "message": task.last_error}
+        if link_status == "unchanged":
+            task.status = TASK_DUPLICATE_FILE
+            task.finished_at = datetime.now(UTC)
+            task.last_error = None
+            db.commit()
+            return {
+                "ok": True,
+                "status": task.status,
+                "file_object_id": file_object.id,
+                "message": "文件内容无变化，未创建新版本",
+            }
 
         task.status = TASK_DUPLICATE_FILE if is_duplicate else TASK_ARCHIVED
         task.finished_at = datetime.now(UTC)

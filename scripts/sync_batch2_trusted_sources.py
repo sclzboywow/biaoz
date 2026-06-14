@@ -20,6 +20,7 @@ from app import models  # noqa: E402
 from app.batch2_adapters import BATCH2_ADAPTER_KEYS  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
 from app.settings_store import ensure_default_trusted_sources  # noqa: E402
+from app.batch2_file_ingest_service import discover_files_for_source  # noqa: E402
 from app.trusted_source_adapters import TrustedSourceSyncOptions, registry  # noqa: E402
 
 
@@ -65,6 +66,14 @@ def _sync_one(source: dict[str, Any], args: argparse.Namespace) -> dict[str, Any
             payload = {**source, "ok": ok, "stats": result.__dict__}
             if not ok:
                 payload["error"] = f"sync completed with {result.errors} adapter error(s)"
+            if ok and not args.no_detail and not args.skip_file_discovery:
+                from app.batch2_admission import batch2_pipeline_enabled
+
+                if batch2_pipeline_enabled(db):
+                    discovery = discover_files_for_source(db, source_id=source["id"], limit=max(50, args.pages * 20))
+                    payload["file_discovery"] = discovery
+                else:
+                    payload["file_discovery"] = {"skipped": True, "reason": "batch2_pipeline_disabled"}
             return payload
         except Exception as exc:
             return {**source, "ok": False, "error": repr(exc)}
@@ -75,6 +84,7 @@ def main() -> int:
     parser.add_argument("--pages", type=int, default=3)
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--no-detail", action="store_true")
+    parser.add_argument("--skip-file-discovery", action="store_true", help="Skip post-sync official file discovery")
     parser.add_argument("--only-pending-categories", action="store_true")
     parser.add_argument("--include-disabled", action="store_true", help="Also sync sources with enabled=false")
     parser.add_argument("--adapter-key", action="append", default=[])

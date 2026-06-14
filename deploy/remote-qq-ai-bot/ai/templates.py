@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import re
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 BOT_DISPLAY_NAME = "标准库助手"
 
@@ -60,6 +60,34 @@ def help_text() -> str:
 
 def help_text_private() -> str:
     return help_text_private_short()
+
+
+def group_welcome_message(user_id: Any) -> tuple[str, List[dict]]:
+    """Welcome text for new group members, with an @ mention segment."""
+    body = (
+        "欢迎入群！\n\n"
+        f"我是{BOT_DISPLAY_NAME}，可以帮你查规范、标准、图集资料。\n\n"
+        "【怎么用】\n"
+        f"1. 查资料：@{BOT_DISPLAY_NAME} GB50016\n"
+        "   也可发图集号，例如：16G101\n"
+        "   或发名称，例如：建筑防火规范\n\n"
+        "2. 下载资料：看到结果后回复编号，例如：1\n\n"
+        "3. 购买下载券：买1 / 买10 / 买25\n\n"
+        "4. 查看余额：发送「余额」\n\n"
+        "5. 链接失效：24 小时内回复「重发」\n\n"
+        "6. 更多说明：发送「帮助」\n\n"
+        "说明：查询免费；下载完整资料消耗下载券（1 份 = 1 张）。"
+    )
+    segments = [
+        {"type": "at", "data": {"qq": str(user_id)}},
+        {"type": "text", "data": {"text": "\n" + body}},
+    ]
+    return body, segments
+
+
+def format_group_welcome_plain(user_id: Any) -> str:
+    body, _segments = group_welcome_message(user_id)
+    return f"@{user_id}\n{body}"
 
 
 RATE_LIMIT_USER_REPLY = "操作有点频繁，我主要负责资料查询。请直接 @我 + 编号或名称。"

@@ -70,7 +70,15 @@ class NrsNaturalResourceAdapter(StandardCatalogAdapterMixin):
             try:
                 items = self._collect_items(client)
                 stats.pages = 1
-                self._persist_items(db, source, category, items, stats)
+                self._persist_items(
+                    db,
+                    source,
+                    category,
+                    items,
+                    stats,
+                    discover_files=options.include_detail,
+                    client=client,
+                )
                 db.commit()
                 category.resource_count = len(items)
             except Exception as exc:

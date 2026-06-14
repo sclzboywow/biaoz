@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import models
+from app.batch2_admission import BATCH2_STANDARD_BODY_ADAPTER_KEYS
 from app.governance_decision_engine import DECISION_AUTO_CONFIRMED, DECISION_AUTO_MERGED
 from app.settings_store import get_bool_setting, get_int_setting
 
@@ -30,6 +31,7 @@ ADAPTER_TO_CHANNEL: dict[str, str] = {
     "samr_local_standard_public": "sacinfo_local",
     "samr_enterprise_standard_public": "qybz",
     "spc_standard_online": "spc_online",
+    **{adapter_key: "batch2_standard_body" for adapter_key in BATCH2_STANDARD_BODY_ADAPTER_KEYS},
 }
 
 CHANNEL_SCRIPTS: dict[str, tuple[str, list[str]]] = {
@@ -38,6 +40,7 @@ CHANNEL_SCRIPTS: dict[str, tuple[str, list[str]]] = {
     "sacinfo_local": ("batch_ingest_sacinfo_portal_files.py", ["--platform", "local"]),
     "qybz": ("batch_ingest_qybz_files.py", []),
     "spc_online": ("batch_ingest_spc_online_files.py", []),
+    "batch2_standard_body": ("batch_ingest_batch2_files.py", []),
 }
 
 
@@ -64,7 +67,8 @@ def group_resources_by_channel(
     for resource in rows:
         if resource.source_id not in source_cache:
             source_cache[resource.source_id] = db.get(models.TrustedSource, resource.source_id)
-        channel = _channel_for_resource(resource, source_cache[resource.source_id])
+        trusted_source = source_cache[resource.source_id]
+        channel = _channel_for_resource(resource, trusted_source)
         if channel:
             grouped[channel].append(resource.id)
     return dict(grouped)
@@ -134,6 +138,8 @@ def trigger_post_decision_ingest(
     max_items = max(1, min(max_items, 200))
     trimmed_ids = resource_ids[:max_items]
     grouped = group_resources_by_channel(db, trimmed_ids)
+    if not get_bool_setting(db, "batch2_file_ingest_enabled", default=False):
+        grouped = {channel: ids for channel, ids in grouped.items() if channel != "batch2_standard_body"}
 
     channel_results: list[dict] = []
     for channel, ids in grouped.items():

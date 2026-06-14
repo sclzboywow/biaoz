@@ -102,7 +102,7 @@ def prepare_ocr_eligible_decisions(db, *, scan_limit: int = 5000, target: int = 
         _apply_decision_to_resource(resource, result)
         _persist_decision(db, run_id=run.id, resource=resource, result=result, dry_run=False)
         stats["decided"] += 1
-        ok, _ = _resource_eligible_for_ocr(resource, trusted)
+        ok, _ = _resource_eligible_for_ocr(db, resource, trusted)
         if ok and result.decision in {DECISION_AUTO_CONFIRMED, DECISION_AUTO_MERGED}:
             stats["ocr_eligible"] += 1
         log_governance_decision_audit(

@@ -323,6 +323,8 @@ class StandardResource(TimestampMixin, Base):
     source_category_path: Mapped[str | None] = mapped_column(Text)
     detail_url: Mapped[str | None] = mapped_column(Text)
     pdf_trial_url: Mapped[str | None] = mapped_column(Text)
+    official_file_url: Mapped[str | None] = mapped_column(Text)
+    file_ingest_status: Mapped[str | None] = mapped_column(String(40), index=True)
     detail_hash: Mapped[str | None] = mapped_column(String(128))
     source_confidence: Mapped[int] = mapped_column(Integer, default=100)
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

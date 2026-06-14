@@ -4,6 +4,8 @@ import json
 
 import os
 
+import random
+
 import subprocess
 
 import uuid
@@ -23,7 +25,7 @@ from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconne
 
 
 from ai.db import init_ai_db
-from ai.templates import format_ticket_paid_notice, help_text_private
+from ai.templates import format_ticket_paid_notice, group_welcome_message, help_text_private
 from bot_library import LibraryBotHandler, is_private_scope
 from library_client import LibraryClient
 from qq_file_api import extract_file_segments_from_event, get_qq_file_api
@@ -58,6 +60,13 @@ ALLOW_USERS = {x.strip() for x in os.getenv("ALLOW_USERS", "").split(",") if x.s
 ALLOW_GROUPS = {x.strip() for x in os.getenv("ALLOW_GROUPS", "").split(",") if x.strip()}
 
 AUTO_ACCEPT_FRIEND = os.getenv("AUTO_ACCEPT_FRIEND", "true").lower() in {"1", "true", "yes", "on"}
+AUTO_ACCEPT_GROUP = os.getenv("AUTO_ACCEPT_GROUP", "true").lower() in {"1", "true", "yes", "on"}
+GROUP_ACCEPT_DELAY_MIN = float(os.getenv("GROUP_ACCEPT_DELAY_MIN", "2"))
+GROUP_ACCEPT_DELAY_MAX = float(os.getenv("GROUP_ACCEPT_DELAY_MAX", "5"))
+GROUP_WELCOME_ENABLED = os.getenv("GROUP_WELCOME_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+GROUP_WELCOME_DELAY_SECONDS = float(os.getenv("GROUP_WELCOME_DELAY_SECONDS", "1.5"))
+
+_recent_group_welcomes: Dict[str, float] = {}
 
 
 
@@ -436,6 +445,47 @@ async def send_library_reply(
         await send_group_msg(ws, send_lock, event.get("group_id"), message)
 
 
+async def send_group_welcome(ws: WebSocket, send_lock: asyncio.Lock, group_id: Any, user_id: Any) -> None:
+    if not GROUP_WELCOME_ENABLED or not group_id or not user_id:
+        return
+    if not is_allowed_group(group_id):
+        return
+    dedupe_key = f"{group_id}:{user_id}"
+    now = asyncio.get_running_loop().time()
+    last_sent = _recent_group_welcomes.get(dedupe_key)
+    if last_sent is not None and now - last_sent < 60:
+        return
+    _recent_group_welcomes[dedupe_key] = now
+    if GROUP_WELCOME_DELAY_SECONDS > 0:
+        await asyncio.sleep(GROUP_WELCOME_DELAY_SECONDS)
+    _text, segments = group_welcome_message(user_id)
+    print(f"发送进群欢迎语 group={group_id} user={user_id}")
+    await send_group_msg(ws, send_lock, group_id, segments)
+
+
+async def handle_notice_event(ws: WebSocket, send_lock: asyncio.Lock, event: Dict[str, Any]):
+    if event.get("post_type") != "notice":
+        return
+    if event.get("notice_type") != "group_increase":
+        return
+
+    user_id = event.get("user_id")
+    group_id = event.get("group_id")
+    if not user_id or not group_id:
+        return
+    if str(user_id) == str(event.get("self_id")):
+        return
+
+    sub_type = event.get("sub_type")
+    if sub_type not in {"approve", "add", "invite"}:
+        return
+
+    try:
+        await send_group_welcome(ws, send_lock, group_id, user_id)
+    except Exception as e:
+        print(f"发送进群欢迎语失败 group={group_id} user={user_id}: {type(e).__name__}: {e}")
+
+
 async def handle_request_event(ws: WebSocket, send_lock: asyncio.Lock, event: Dict[str, Any]):
     if event.get("post_type") != "request":
         return
@@ -465,25 +515,43 @@ async def handle_request_event(ws: WebSocket, send_lock: asyncio.Lock, event: Di
             print(f"发送私聊欢迎语失败 user_id={user_id}: {type(e).__name__}: {e}")
         return
 
-    if request_type == "group" and os.getenv("AUTO_ACCEPT_GROUP", "false").lower() in {"1", "true", "yes", "on"}:
+    if request_type == "group" and AUTO_ACCEPT_GROUP:
         flag = event.get("flag")
         if not flag:
             return
         sub_type = event.get("sub_type")
+        group_id = event.get("group_id")
+        user_id = event.get("user_id")
         approve = sub_type != "invite"
-        print(f"自动处理加群请求 sub_type={sub_type} approve={approve}")
+        delay_min = max(0.0, GROUP_ACCEPT_DELAY_MIN)
+        delay_max = max(delay_min, GROUP_ACCEPT_DELAY_MAX)
+        delay_seconds = delay_min if delay_max == delay_min else random.uniform(delay_min, delay_max)
+        print(
+            f"加群请求 sub_type={sub_type} group={group_id} user={user_id} "
+            f"approve={approve} delay={delay_seconds:.1f}s"
+        )
+        await asyncio.sleep(delay_seconds)
         await send_api_action(
             ws,
             send_lock,
             "set_group_add_request",
             {"flag": flag, "approve": approve, "reason": ""},
         )
+        if approve and sub_type == "add":
+            try:
+                await send_group_welcome(ws, send_lock, group_id, user_id)
+            except Exception as e:
+                print(f"自动通过后发送欢迎语失败 group={group_id} user={user_id}: {type(e).__name__}: {e}")
 
 
 async def handle_event(ws: WebSocket, send_lock: asyncio.Lock, event: Dict[str, Any]):
     post_type = event.get("post_type")
     if post_type == "request":
         await handle_request_event(ws, send_lock, event)
+        return
+
+    if post_type == "notice":
+        await handle_notice_event(ws, send_lock, event)
         return
 
     if post_type != "message":
@@ -747,6 +815,12 @@ async def health():
         "private_library_mode": LIBRARY_MODE,
 
         "auto_accept_friend": AUTO_ACCEPT_FRIEND,
+        "auto_accept_group": AUTO_ACCEPT_GROUP,
+        "group_welcome_enabled": GROUP_WELCOME_ENABLED,
+        "group_accept_delay_seconds": {
+            "min": GROUP_ACCEPT_DELAY_MIN,
+            "max": GROUP_ACCEPT_DELAY_MAX,
+        },
 
         "ai_mode": os.getenv("AI_MODE", "light"),
 

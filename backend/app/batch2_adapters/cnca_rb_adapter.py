@@ -97,7 +97,15 @@ class CncaRbStandardAdapter(StandardCatalogAdapterMixin):
                     break
                 last_page = page_number
                 stats.pages += 1
-                self._persist_items(db, source, category, items, stats)
+                self._persist_items(
+                    db,
+                    source,
+                    category,
+                    items,
+                    stats,
+                    discover_files=options.include_detail,
+                    client=client,
+                )
                 db.commit()
                 delay()
         finalize_category_sync(db, category, stats, errors=errors, page_number=max(last_page, 1), total_pages=None)

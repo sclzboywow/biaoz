@@ -470,6 +470,8 @@ class StandardResourceOut(OrmModel):
     source_category_path: str | None = None
     detail_url: str | None = None
     pdf_trial_url: str | None = None
+    official_file_url: str | None = None
+    file_ingest_status: str | None = None
     source_confidence: int
     last_synced_at: datetime | None = None
     sync_status: str | None = None

@@ -180,6 +180,12 @@ DEFAULT_SETTINGS: dict[str, dict[str, str]] = {
         "label": "决策后采集批次上限",
         "description": "每轮治理批处理最多触发多少个标准资源的文件采集。",
     },
+    "batch2_file_ingest_enabled": {
+        "value": "false",
+        "value_type": "bool",
+        "label": "第二批可信源正式文件流水线",
+        "description": "开启后第二批标准正文源在 file_ready 且通过 admission 校验后可进入 Document/DocumentVersion；公告类材料始终仅作线索/证据。",
+    },
 }
 
 

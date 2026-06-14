@@ -18,6 +18,8 @@ from bs4 import BeautifulSoup, Tag
 from sqlalchemy.orm import Session
 
 from app import models
+from app.batch2_admission import is_batch2_trusted_source, sanitize_batch2_resource_updates
+from app.batch2_http import absolute_url, fetch_html, make_client
 from app.standard_number import extract_all_codes_from_text, normalize_standard_no
 from app.status_calibration import attach_change_logs_to_documents, calibrate_resource_status
 from app.trusted_source_adapters import (
@@ -113,22 +115,15 @@ def system_status(source_status: str | None) -> str:
 
 
 def default_headers(referer: str | None = None) -> dict[str, str]:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 StandardDocsBatch2/1.0",
-        "Accept": "application/json,text/html,*/*;q=0.8",
-        "Accept-Language": "zh-CN,zh;q=0.9",
-    }
-    if referer:
-        headers["Referer"] = referer
-    return headers
+    from app.batch2_http import default_headers as _default_headers
+
+    return _default_headers(referer)
 
 
 def make_client(referer: str | None = None, timeout: float = 30) -> httpx.Client:
-    return httpx.Client(
-        follow_redirects=True,
-        timeout=timeout,
-        headers=default_headers(referer),
-    )
+    from app.batch2_http import make_client as _make_client
+
+    return _make_client(referer, timeout)
 
 
 def ensure_single_category(db: Session, source: models.TrustedSource, config: CategoryConfig) -> models.SourceCategory:
@@ -199,6 +194,8 @@ def upsert_resource(
     *,
     evidence_summary: str | None = None,
 ) -> tuple[models.StandardResource, bool]:
+    if is_batch2_trusted_source(source):
+        updates = sanitize_batch2_resource_updates(updates)
     resource = (
         db.query(models.StandardResource)
         .filter(models.StandardResource.source_id == source.id, models.StandardResource.source_book_id == item_id)
@@ -384,12 +381,9 @@ def extract_standard_no_from_title(title: str) -> str | None:
 
 
 def absolute_url(base_url: str, href: str | None) -> str | None:
-    if not href:
-        return None
-    href = href.strip()
-    if href.startswith("http"):
-        return href
-    return urljoin(base_url.rstrip("/") + "/", href.lstrip("/"))
+    from app.batch2_http import absolute_url as _absolute_url
+
+    return _absolute_url(base_url, href)
 
 
 def host_from_url(url: str | None) -> str | None:
@@ -521,6 +515,9 @@ class StandardCatalogAdapterMixin(LocalIndexSearchAdapterMixin):
         category: models.SourceCategory,
         items: list[ParsedListItem],
         stats: TrustedSourceSyncStats,
+        *,
+        discover_files: bool = False,
+        client: httpx.Client | None = None,
     ) -> None:
         for item in items:
             payload = {
@@ -541,7 +538,18 @@ class StandardCatalogAdapterMixin(LocalIndexSearchAdapterMixin):
             stats.created += 1 if created else 0
             stats.updated += 0 if created else 1
             stats.items += 1
-            apply_resource_calibration(db, resource, stats)
+            if is_batch2_trusted_source(source):
+                from app.batch2_file_ingest_service import apply_batch2_resource_file_status
+
+                apply_batch2_resource_file_status(
+                    db,
+                    source,
+                    resource,
+                    discover_files=discover_files,
+                    client=client,
+                )
+            else:
+                apply_resource_calibration(db, resource, stats)
 
     def search_external(self, db: Session, source_id: int, query: TrustedSourceSearchQuery) -> list[TrustedSourceSearchResult]:
         return self._search_external_impl(db, source_id, query)
@@ -599,7 +607,12 @@ class AnnouncementCatalogAdapterMixin(StandardCatalogAdapterMixin):
         stats.created += 1 if created else 0
         stats.updated += 0 if created else 1
         stats.items += 1
-        apply_resource_calibration(db, resource, stats)
+        if is_batch2_trusted_source(source):
+            from app.batch2_file_ingest_service import apply_batch2_resource_file_status
+
+            apply_batch2_resource_file_status(db, source, resource, discover_files=False)
+        else:
+            apply_resource_calibration(db, resource, stats)
 
 
 def fetch_json_list(
@@ -630,17 +643,9 @@ def fetch_json_list(
 
 
 def fetch_html(client: httpx.Client, url: str) -> str:
-    last_error: Exception | None = None
-    for attempt in range(1, BATCH2_RETRY_ATTEMPTS + 1):
-        try:
-            response = client.get(url)
-            response.raise_for_status()
-            return response.text
-        except httpx.HTTPError as exc:
-            last_error = exc
-            if attempt < BATCH2_RETRY_ATTEMPTS:
-                time.sleep(min(2 * attempt, 8))
-    raise RuntimeError(f"fetch failed for {url}: {last_error}")
+    from app.batch2_http import fetch_html as _fetch_html
+
+    return _fetch_html(client, url)
 
 
 def paginate_indices(start_page: int, max_pages: int) -> range:
